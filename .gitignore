@@ -1,0 +1,15 @@
+node_modules
+dist
+.DS_Store
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.key.json
+
+# The harvested dataset. Large, and rebuilt only by running.
+.lyra/
+*.db
+*.db-wal
+*.db-shm
