@@ -1,0 +1,31 @@
+[2026-08-02T23:20:55.873Z] harvester started — universe: BTC, ETH, HYPE, SOL, PAXG, KAITO, XRP, DOGE
+(node:86134) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[2026-08-02T23:20:56.723Z] connected, watching 8 assets
+[2026-08-02T23:21:55.880Z] addresses 932 (683 polled) | open 6343 | changes logged 6343 | closures 0 | polls 142 | reconnects 0
+[2026-08-02T23:22:55.885Z] addresses 977 (828 polled) | open 7067 | changes logged 7067 | closures 0 | polls 287 | reconnects 0
+[2026-08-02T23:23:55.914Z] addresses 1022 (970 polled) | open 8131 | changes logged 8131 | closures 0 | polls 429 | reconnects 0
+[2026-08-02T23:24:55.920Z] addresses 1066 (1060 polled) | open 8454 | changes logged 8602 | closures 2 | polls 574 | reconnects 0
+[2026-08-02T23:25:55.930Z] addresses 1114 (1104 polled) | open 8720 | changes logged 10179 | closures 5 | polls 704 | reconnects 0
+[2026-08-02T23:26:55.940Z] addresses 1171 (1167 polled) | open 8828 | changes logged 11017 | closures 13 | polls 841 | reconnects 0
+[2026-08-02T23:27:55.946Z] addresses 1207 (1204 polled) | open 8931 | changes logged 11496 | closures 20 | polls 987 | reconnects 0
+[2026-08-02T23:28:55.955Z] addresses 1251 (1246 polled) | open 9018 | changes logged 12147 | closures 30 | polls 1132 | reconnects 0
+[2026-08-02T23:29:55.967Z] addresses 1290 (1288 polled) | open 9145 | changes logged 12954 | closures 37 | polls 1272 | reconnects 0
+[2026-08-02T23:30:55.981Z] addresses 1336 (1334 polled) | open 9426 | changes logged 13438 | closures 43 | polls 1412 | reconnects 0
+[2026-08-02T23:31:55.993Z] addresses 1375 (1373 polled) | open 9504 | changes logged 13824 | closures 45 | polls 1553 | reconnects 0
+[2026-08-02T23:32:56.006Z] addresses 1418 (1413 polled) | open 10259 | changes logged 14938 | closures 48 | polls 1693 | reconnects 0
+[2026-08-02T23:33:56.014Z] addresses 1459 (1456 polled) | open 10393 | changes logged 15524 | closures 60 | polls 1836 | reconnects 0
+[2026-08-02T23:34:56.028Z] addresses 1526 (1522 polled) | open 10520 | changes logged 15799 | closures 63 | polls 1983 | reconnects 0
+[2026-08-02T23:35:56.038Z] addresses 1569 (1564 polled) | open 10855 | changes logged 16283 | closures 67 | polls 2123 | reconnects 0
+[2026-08-02T23:36:56.050Z] addresses 1607 (1605 polled) | open 11218 | changes logged 17578 | closures 68 | polls 2261 | reconnects 0
+[2026-08-02T23:37:56.068Z] addresses 1643 (1638 polled) | open 11291 | changes logged 18424 | closures 71 | polls 2395 | reconnects 0
+[2026-08-02T23:38:56.079Z] addresses 1664 (1662 polled) | open 11385 | changes logged 19109 | closures 82 | polls 2535 | reconnects 0
+[2026-08-02T23:39:56.133Z] addresses 1699 (1695 polled) | open 11609 | changes logged 19665 | closures 87 | polls 2680 | reconnects 0
+[2026-08-02T23:40:56.152Z] addresses 1733 (1730 polled) | open 12171 | changes logged 20592 | closures 92 | polls 2819 | reconnects 0
+[2026-08-02T23:41:56.171Z] addresses 1757 (1755 polled) | open 12252 | changes logged 21304 | closures 102 | polls 2958 | reconnects 0
+[2026-08-02T23:42:56.183Z] addresses 1776 (1775 polled) | open 12278 | changes logged 21773 | closures 106 | polls 3104 | reconnects 0
+[2026-08-02T23:43:56.203Z] addresses 1795 (1793 polled) | open 12307 | changes logged 22129 | closures 115 | polls 3250 | reconnects 0
+[2026-08-02T23:44:56.221Z] addresses 1823 (1820 polled) | open 12336 | changes logged 22445 | closures 121 | polls 3392 | reconnects 0
+[2026-08-02T23:45:56.241Z] addresses 1853 (1851 polled) | open 12566 | changes logged 23341 | closures 130 | polls 3532 | reconnects 0
+[2026-08-02T23:46:56.259Z] addresses 1879 (1876 polled) | open 12595 | changes logged 23851 | closures 133 | polls 3671 | reconnects 0
+[2026-08-02T23:47:56.275Z] addresses 1916 (1913 polled) | open 13172 | changes logged 24614 | closures 139 | polls 3812 | reconnects 0

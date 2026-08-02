@@ -1,0 +1,44 @@
+# Lyra position harvester.
+#
+# Deliberately isolated: its own user, its own directory, no ports, no shared
+# state. It can run on a box that hosts other projects without touching them.
+[Unit]
+Description=Lyra venue position harvester
+Documentation=https://github.com/lyra-protocol/lyra-core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lyra
+Group=lyra
+WorkingDirectory=/opt/lyra/lyra-core
+Environment=NODE_ENV=production
+Environment=LYRA_DB=/opt/lyra/data/venue.db
+ExecStart=/usr/bin/node /opt/lyra/lyra-core/dist/main.js
+
+# A gap in the dataset cannot be backfilled, so it always comes back.
+Restart=always
+RestartSec=5
+
+# Isolation from anything else on the host.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/lyra/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Bounded so it can never starve a co-tenant application.
+MemoryMax=1G
+CPUQuota=50%
+
+StandardOutput=append:/opt/lyra/data/harvest.log
+StandardError=append:/opt/lyra/data/harvest.log
+
+[Install]
+WantedBy=multi-user.target
