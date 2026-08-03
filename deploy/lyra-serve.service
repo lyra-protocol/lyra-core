@@ -15,6 +15,7 @@ Group=lyra
 WorkingDirectory=/opt/lyra/lyra-core
 Environment=NODE_ENV=production
 Environment=LYRA_DB=/opt/lyra/data/venue.db
+Environment=LYRA_EXEC_DB=/opt/lyra/data/exec.db
 Environment=LYRA_SERVE_PORT=8788
 Environment=LYRA_ALLOWED_ORIGINS=https://www.lyrabuild.xyz,https://lyrabuild.xyz,http://localhost:3000
 ExecStart=/opt/lyra/node/bin/node /opt/lyra/lyra-core/dist/serve-main.js

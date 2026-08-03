@@ -53,8 +53,17 @@ export type RecorderConfig = {
   key: OwnerKey;
   venueAddress: string;
   strategyId: string;
-  /** Marks the ledger as paper. Paper runs use a different owner key entirely. */
-  mode: "paper" | "live";
+  /**
+   * How permanent this run is.
+   *
+   *   "offchain" — she trades, but nothing reaches Arweave. Reasoning ids are
+   *                prefixed "local:" so they can never be mistaken for a real
+   *                record. Used while the parameters are still guesses: Arweave
+   *                has no delete, and a ledger of noise is a permanent liability.
+   *   "paper"    — real records, separate owner key, no money at risk.
+   *   "live"     — real records, real money.
+   */
+  mode: "offchain" | "paper" | "live";
   dataDir?: string;
 };
 
@@ -94,6 +103,13 @@ export class Recorder {
       decision,
       audit,
     };
+
+    // Off-chain runs skip the upload entirely and say so in the id. The blocking
+    // rule does not apply here because there is nothing being claimed: no record
+    // exists to be missing.
+    if (this.config.mode === "offchain") {
+      return `local:${decisionId}`;
+    }
 
     try {
       const { uploadJson } = await import("./upload.js");
@@ -139,6 +155,10 @@ export class Recorder {
     venueCloseId: string;
     reasoningId: string | null;
   }): Promise<{ arweaveId: string; sequence: number }> {
+    if (this.config.mode === "offchain") {
+      // Recorded in the local store by the caller; nothing permanent is written.
+      return { arweaveId: `local:${trade.venueOpenId}`, sequence: -1 };
+    }
     const owner = this.config.key.publicKey;
     const record: TradeRecord = {
       schema_version: 2,
