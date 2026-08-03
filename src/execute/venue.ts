@@ -86,6 +86,20 @@ export interface Venue {
   cancel(asset: string, cloid: string): Promise<boolean>;
 
   /** Everything currently open, for startup reconciliation (§9.3). */
+  /**
+   * Fills observed since the last call, for orders already resting.
+   *
+   * This is not an optimisation. Every order Lyra places is maker-only, so
+   * `place()` returns `resting` and the fill arrives seconds to hours later —
+   * meaning a venue with no way to report a later fill leaves every position
+   * she has ever taken invisible to the store, and therefore unprotected by a
+   * stop and absent from the ledger.
+   *
+   * Results include triggered stops, whose cloid is the stop's rather than the
+   * entry's.
+   */
+  settle(asset: string): Promise<PlaceResult[]>;
+
   openOrders(): Promise<OpenOrder[]>;
   positions(): Promise<VenuePosition[]>;
   equityUsd(): Promise<number>;

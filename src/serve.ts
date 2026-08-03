@@ -126,7 +126,8 @@ export function createColdServer(config: ServeConfig) {
         };
       }
       const open = execDb
-        .prepare(`SELECT asset, side, size, entry_px, stop_cloid FROM position WHERE closed_at IS NULL`)
+        .prepare(`SELECT asset, side, size, entry_px, stop_cloid, stop_px, opened_at
+                  FROM position WHERE closed_at IS NULL`)
         .all() as Record<string, unknown>[];
       const px = await mids();
       let notional = 0;
@@ -144,24 +145,57 @@ export function createColdServer(config: ServeConfig) {
           side: p.side as "long" | "short",
           size: p.size as string,
           entryPx: p.entry_px as string,
-          stopPx: null,
+          stopPx: (p.stop_px as string | null) ?? null,
+          openedAt: p.opened_at as number,
+          markPx: String(mark),
+          // What she actually loses if the stop fills, as a fraction of equity.
+          // The figure a trader reads before PnL.
+          riskUsd: p.stop_px ? Math.abs((Number(p.stop_px) - entry) * size) : null,
           unrealizedPnlUsd: pnl,
         };
       });
 
       const since = new Date().setUTCHours(0, 0, 0, 0);
-      const realised = execDb
-        .prepare(`SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0) AS n FROM position WHERE closed_at >= ?`)
-        .get(since) as { n: number };
+      const sum = (where: string, ...args: unknown[]) =>
+        (execDb!
+          .prepare(`SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0) AS p,
+                           COALESCE(SUM(CAST(fees AS REAL)), 0) AS f
+                    FROM position WHERE ${where}`)
+          .get(...(args as never[])) as { p: number; f: number });
+
+      const today = sum("closed_at >= ?", since);
+      const priorToToday = sum("closed_at IS NOT NULL AND closed_at < ?", since);
+
+      /*
+       * Equity is reconstructed rather than read from the venue.
+       *
+       * This process is deliberately read-only and holds no key, so it cannot
+       * ask Hyperliquid anything — which is the property that makes the whole
+       * endpoint safe to expose. The cost is that equity is derived: starting
+       * capital, plus everything realised, minus fees, plus what is open.
+       *
+       * It will differ from the venue by funding payments, which are not in
+       * this database. Stated here rather than hidden because a figure that
+       * silently disagrees with the venue is worse than one known to.
+       */
+      const startingEquity = Number(process.env.LYRA_PAPER_EQUITY ?? 10_000);
+      const realisedAll = today.p + priorToToday.p;
+      const feesAll = today.f + priorToToday.f;
+      const equity = startingEquity + realisedAll - feesAll + unrealised;
+
+      // The 7% breaker measures the day against the equity the day opened with.
+      const sessionStart = startingEquity + priorToToday.p - priorToToday.f;
+      const sessionPnl = today.p - today.f + unrealised;
+      const dailyLossUsed = sessionStart > 0 ? Math.max(0, -sessionPnl) / sessionStart : 0;
 
       return {
-        trading: open.length > 0 || realised.n !== 0,
-        equityUsd: 0,
+        trading: open.length > 0 || realisedAll !== 0,
+        equityUsd: equity,
         notionalUsd: notional,
         unrealizedPnlUsd: unrealised,
-        sessionPnlUsd: realised.n,
+        sessionPnlUsd: sessionPnl,
         openPositions: open.length,
-        dailyLossUsed: 0,
+        dailyLossUsed,
         positions,
       };
     },

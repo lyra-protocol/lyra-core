@@ -55,6 +55,8 @@ export type StoredPosition = {
   openedAt: number;
   /** cloid of the protective stop resting at the venue. Null means unprotected. */
   stopCloid: string | null;
+  /** Trigger price of that stop. Null when unprotected. */
+  stopPx: string | null;
   closedAt: number | null;
   exitPx: string | null;
   pnl: string | null;
@@ -123,6 +125,7 @@ export class ExecutionStore {
         entry_px      TEXT NOT NULL,
         opened_at     INTEGER NOT NULL,
         stop_cloid    TEXT,
+        stop_px       TEXT,
         closed_at     INTEGER,
         exit_px       TEXT,
         pnl           TEXT,
@@ -133,6 +136,16 @@ export class ExecutionStore {
 
       CREATE INDEX IF NOT EXISTS idx_position_open ON position(closed_at);
     `);
+
+    // CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
+    // so a column added after a database is in the field needs this. Cheap,
+    // idempotent, and it runs before anything reads the column.
+    for (const [table, column, type] of [["position", "stop_px", "TEXT"]] as const) {
+      const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!columns.some((c) => c.name === column)) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      }
+    }
   }
 
   /** Persisted before the model result is acted on, so nothing is lost on a crash. */
@@ -221,19 +234,66 @@ export class ExecutionStore {
     ).map(rowToIntent);
   }
 
-  openPosition(p: Omit<StoredPosition, "id" | "closedAt" | "exitPx" | "pnl" | "fees" | "recordedSequence" | "recordedArweaveId">): number {
+  openPosition(p: Omit<StoredPosition, "id" | "closedAt" | "exitPx" | "pnl" | "recordedSequence" | "recordedArweaveId" | "stopPx">): number {
     const info = this.db
       .prepare(
         `INSERT INTO position
-           (asset, decision_id, reasoning_id, side, size, entry_px, opened_at, stop_cloid)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (asset, decision_id, reasoning_id, side, size, entry_px, opened_at, stop_cloid, fees)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(p.asset, p.decisionId, p.reasoningId, p.side, p.size, p.entryPx, p.openedAt, p.stopCloid);
+      .run(p.asset, p.decisionId, p.reasoningId, p.side, p.size, p.entryPx, p.openedAt,
+           p.stopCloid, p.fees ?? "0");
     return Number(info.lastInsertRowid);
   }
 
-  attachStop(positionId: number, stopCloid: string): void {
-    this.db.prepare(`UPDATE position SET stop_cloid = ? WHERE id = ?`).run(stopCloid, positionId);
+  /** The reasoning record written before this decision's order was placed. */
+  reasoningIdFor(decisionId: string): string | null {
+    const r = this.db
+      .prepare(`SELECT reasoning_arweave_id AS id FROM decision WHERE id = ?`)
+      .get(decisionId) as { id: string | null } | undefined;
+    return r?.id ?? null;
+  }
+
+  /**
+   * The open position a resting stop belongs to.
+   *
+   * A triggered stop arrives as a fill whose cloid is the stop's, not the
+   * entry's, so without this lookup a stop fill is indistinguishable from an
+   * unknown position — the one finding that halts the agent.
+   */
+  positionByStopCloid(stopCloid: string): StoredPosition | undefined {
+    const r = this.db
+      .prepare(`SELECT * FROM position WHERE stop_cloid = ? AND closed_at IS NULL`)
+      .get(stopCloid) as Record<string, unknown> | undefined;
+    return r ? rowToPosition(r) : undefined;
+  }
+
+  /**
+   * Averages a further fill into an open position.
+   *
+   * She scales into a level rather than taking it in one order, so a second
+   * fill on the same side is an addition, not a second position. Inserting a
+   * second row would make `positionByAsset` ambiguous and double-count the
+   * notional the guard sees.
+   */
+  resizePosition(positionId: number, next: { size: string; entryPx: string; fees: string }): void {
+    this.db
+      .prepare(`UPDATE position SET size = ?, entry_px = ?, fees = ? WHERE id = ?`)
+      .run(next.size, next.entryPx, next.fees, positionId);
+  }
+
+  /**
+   * Records the stop resting at the venue.
+   *
+   * The trigger price is stored alongside the id because the id alone cannot
+   * answer the only question anyone asks of a position — how much of this is
+   * at risk. Reconstructing it later would mean re-deriving a number the venue
+   * already accepted, which is a different number the moment sizing changes.
+   */
+  attachStop(positionId: number, stopCloid: string, stopPx: string | null = null): void {
+    this.db
+      .prepare(`UPDATE position SET stop_cloid = ?, stop_px = ? WHERE id = ?`)
+      .run(stopCloid, stopPx, positionId);
   }
 
   closePosition(
@@ -316,6 +376,7 @@ function rowToPosition(r: Record<string, unknown>): StoredPosition {
     entryPx: r.entry_px as string,
     openedAt: r.opened_at as number,
     stopCloid: (r.stop_cloid as string) ?? null,
+    stopPx: (r.stop_px as string) ?? null,
     closedAt: (r.closed_at as number) ?? null,
     exitPx: (r.exit_px as string) ?? null,
     pnl: (r.pnl as string) ?? null,

@@ -115,16 +115,23 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => { running = false; store.close(); process.exit(0); });
 }
 
-/** Resting orders are advanced against real trades between decision cycles. */
+/**
+ * Resting orders are advanced against real trades between decision cycles.
+ *
+ * The agent owns what happens to a fill — it opens the position, attaches the
+ * stop and drives the ledger. This loop only decides *when* to look, which is
+ * the one thing that differs between paper and live.
+ */
 setInterval(() => {
   void (async () => {
-    for (const asset of UNIVERSE) {
-      try {
-        for (const fill of await venue.settle(asset)) {
-          log(`FILL ${asset} ${fill.filledSize} @ ${fill.avgFillPx} ${fill.reason ?? ""}`);
-        }
-      } catch { /* a settle failure must not stop the loop */ }
-    }
+    try {
+      for (const o of await agent.settle()) {
+        if (o.result === "opened") log(`FILL ${o.asset} opened ${o.size} @ ${o.px}`);
+        else if (o.result === "added") log(`FILL ${o.asset} added → ${o.size} @ ${o.px}`);
+        else if (o.result === "closed") log(`FILL ${o.asset} closed @ ${o.px} pnl ${o.pnl} (${o.why})`);
+        else log(`FILL ${o.asset} ORPHAN ${o.cloid} — ${o.detail}`);
+      }
+    } catch (error) { log(`settle FAILED: ${(error as Error).message}`); }
   })();
 }, SETTLE_MS);
 

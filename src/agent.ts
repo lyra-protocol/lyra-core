@@ -56,6 +56,12 @@ export type AgentConfig = {
   log?: (line: string) => void;
 };
 
+export type SettleOutcome =
+  | { asset: string; result: "opened"; positionId: number; size: string; px: string }
+  | { asset: string; result: "added"; positionId: number; size: string; px: string }
+  | { asset: string; result: "closed"; positionId: number; px: string; pnl: string; why: "stop" | "exit" }
+  | { asset: string; result: "orphan"; cloid: string; detail: string };
+
 export type CycleOutcome =
   | { asset: string; result: "skipped"; reason: string }
   | { asset: string; result: "held"; reasoning: string }
@@ -68,6 +74,7 @@ export class Agent {
   private readonly lastSeen = new Map<string, LastSeen>();
   private readonly limits: Limits;
   private started = false;
+  private busy: Promise<void> | null = null;
 
   constructor(private readonly config: AgentConfig) {
     this.limits = config.limits ?? DEFAULT_LIMITS;
@@ -108,9 +115,30 @@ export class Agent {
    */
   async cycle(): Promise<CycleOutcome[]> {
     if (!this.started) throw new Error("start() must complete before cycle()");
+    return this.locked(() => this.runCycle());
+  }
 
+  private async runCycle(): Promise<CycleOutcome[]> {
     const outcomes: CycleOutcome[] = [];
-    // Closures are drained first: a trade that closed but was never recorded is
+
+    // Reconciled every cycle, not only at startup. Divergence between the venue
+    // and the store does not announce itself — a fill missed, a stop rejected,
+    // a process restarted mid-order — and a check that runs once catches only
+    // the state it happened to start in.
+    const agreement = await reconcile(this.config.venue, this.config.store);
+    for (const f of agreement.findings) this.log(`reconcile: ${f.kind} — ${f.detail}`);
+    if (!agreement.safe) {
+      const detail = agreement.haltReason ?? "venue and store disagree";
+      this.log(`HALTED — ${detail}`);
+      return this.config.universe.map((asset) => ({ asset, result: "blocked" as const, detail }));
+    }
+    const repaired = await repair(agreement, this.config.venue, this.config.store, (id, asset) =>
+      this.placeProtectiveStop(id, asset),
+    );
+    if (repaired.repaired > 0) this.log(`reconcile: attached ${repaired.repaired} missing stop(s)`);
+    for (const failure of repaired.failed) this.log(`reconcile: REPAIR FAILED — ${failure}`);
+
+    // Closures are drained next: a trade that closed but was never recorded is
     // a hole in the ledger, and it must not wait behind new decisions.
     await this.recordClosures();
 
@@ -321,17 +349,151 @@ export class Agent {
       return { asset, result: "refused", code: "would_cross_spread", detail: placed.reason ?? "" };
     }
 
+    // An immediate fill is unusual — every order is maker-only — but if the
+    // venue reports one it goes through the same adoption path as a later fill.
+    // Two routes from a fill to a position is how one of them ends up untested.
     if (placed.status === "filled" && placed.avgFillPx) {
-      const positionId = this.config.store.openPosition({
-        asset, decisionId, reasoningId, side,
-        size: placed.filledSize, entryPx: placed.avgFillPx, openedAt: placed.at, stopCloid: null,
+      await this.adoptFill(asset, {
+        cloid, filledSize: placed.filledSize, avgFillPx: placed.avgFillPx,
+        fee: placed.fee, at: placed.at,
       });
-      // The most dangerous window in the system is between here and the stop.
-      await this.placeProtectiveStop(positionId, asset);
     }
 
     this.config.store.setDecisionOutcome(decisionId, "placed");
     return { asset, result: "placed", cloid, price, size };
+  }
+
+  /**
+   * Adopts fills for orders that were already resting.
+   *
+   * Every order she places is maker-only, so `place()` returns `resting` and
+   * the fill lands seconds or hours later. Until this runs, the fill exists
+   * only at the venue: the store has no position, so no stop is attached, the
+   * guard sees a flat account and the recorder has nothing to write. The whole
+   * safety chain hangs off this method being called.
+   *
+   * Runs under the same lock as `cycle()`. Both place orders and both write the
+   * store, and a fill adopted halfway through a decision would be sized against
+   * an account state that no longer exists.
+   */
+  async settle(): Promise<SettleOutcome[]> {
+    return this.locked(async () => {
+      const outcomes: SettleOutcome[] = [];
+      for (const asset of this.config.universe) {
+        let fills: Awaited<ReturnType<Venue["settle"]>>;
+        try {
+          fills = await this.config.venue.settle(asset);
+        } catch (error) {
+          // A settle failure must not stop the others; reconciliation is the
+          // backstop for anything missed here.
+          this.log(`settle ${asset} FAILED: ${(error as Error).message}`);
+          continue;
+        }
+        for (const fill of fills) {
+          if (fill.status !== "filled" || !fill.avgFillPx) continue;
+          try {
+            outcomes.push(await this.adoptFill(asset, fill));
+          } catch (error) {
+            this.log(`adopt ${asset} ${fill.cloid} FAILED: ${(error as Error).message}`);
+          }
+        }
+      }
+      return outcomes;
+    });
+  }
+
+  /** Routes one fill to open, add, or close. */
+  private async adoptFill(
+    asset: string,
+    fill: { cloid: string; filledSize: string; avgFillPx: string | null; fee: string; at: number },
+  ): Promise<SettleOutcome> {
+    const px = fill.avgFillPx!;
+
+    // A triggered stop arrives under the stop's cloid, not the entry's.
+    const stopped = this.config.store.positionByStopCloid(fill.cloid);
+    if (stopped) {
+      const pnl = realisedPnl(stopped, px);
+      const fees = String(Number(stopped.fees ?? "0") + Number(fill.fee));
+      this.config.store.closePosition(stopped.id, { closedAt: fill.at, exitPx: px, pnl, fees });
+      this.log(`${asset}: STOPPED OUT at ${px}, pnl ${pnl}`);
+      return { asset, result: "closed", positionId: stopped.id, px, pnl, why: "stop" };
+    }
+
+    const intent = this.config.store.getIntent(fill.cloid);
+    if (!intent) {
+      // Neither a known order nor a known stop. Reconciliation halts on this;
+      // it is recorded rather than swallowed so the halt has a cause.
+      return { asset, result: "orphan", cloid: fill.cloid, detail: "fill for an unknown order" };
+    }
+
+    this.config.store.updateIntent(fill.cloid, {
+      status: "filled",
+      venueOrderId: intent.venueOrderId,
+      filledSize: fill.filledSize,
+      avgFillPx: px,
+      fee: fill.fee,
+    });
+
+    const open = this.config.store.positionByAsset(asset);
+
+    if (intent.reduceOnly) {
+      if (!open) return { asset, result: "orphan", cloid: fill.cloid, detail: "reduce with nothing open" };
+      const pnl = realisedPnl(open, px);
+      const fees = String(Number(open.fees ?? "0") + Number(fill.fee));
+      this.config.store.closePosition(open.id, { closedAt: fill.at, exitPx: px, pnl, fees });
+      this.log(`${asset}: closed at ${px}, pnl ${pnl}`);
+      return { asset, result: "closed", positionId: open.id, px, pnl, why: "exit" };
+    }
+
+    // She scales into a level across several orders, so a same-side fill on an
+    // open position is an addition. A second row would make positionByAsset
+    // ambiguous and halve the notional the guard sees.
+    if (open && open.side === intent.side) {
+      const size = String(Number(open.size) + Number(fill.filledSize));
+      const entryPx = String(
+        (Number(open.size) * Number(open.entryPx) + Number(fill.filledSize) * Number(px)) /
+          Number(size),
+      );
+      const fees = String(Number(open.fees ?? "0") + Number(fill.fee));
+      this.config.store.resizePosition(open.id, { size, entryPx, fees });
+      // The stop was sized for the old position; it has to move with it.
+      await this.placeProtectiveStop(open.id, asset);
+      this.log(`${asset}: added ${fill.filledSize} at ${px} → ${size} @ ${entryPx}`);
+      return { asset, result: "added", positionId: open.id, size, px };
+    }
+
+    if (open) {
+      return { asset, result: "orphan", cloid: fill.cloid, detail: "fill opposes an open position" };
+    }
+
+    const positionId = this.config.store.openPosition({
+      asset,
+      decisionId: intent.decisionId,
+      reasoningId: this.config.store.reasoningIdFor(intent.decisionId),
+      side: intent.side,
+      size: fill.filledSize,
+      entryPx: px,
+      openedAt: fill.at,
+      stopCloid: null,
+      fees: fill.fee,
+    });
+    // The most dangerous window in the system is between here and the stop.
+    await this.placeProtectiveStop(positionId, asset);
+    this.log(`${asset}: opened ${intent.side} ${fill.filledSize} at ${px}`);
+    return { asset, result: "opened", positionId, size: fill.filledSize, px };
+  }
+
+  /** Serialises settle and cycle; they both write the store and place orders. */
+  private async locked<T>(fn: () => Promise<T>): Promise<T> {
+    while (this.busy) await this.busy.catch(() => {});
+    let release!: () => void;
+    this.busy = new Promise<void>((r) => { release = r; });
+    try {
+      return await fn();
+    } finally {
+      release();
+      this.busy = null;
+    }
   }
 
   /** Attaches a stop at the venue. Called on fill, and by reconciliation on repair. */
@@ -352,7 +514,14 @@ export class Agent {
     });
     if (!trigger) return null;
 
-    const cloid = deriveCloid(`${position.decisionId}:stop`, 0);
+    // Re-stopping after a size change: the old trigger is for a size that no
+    // longer exists, and leaving it resting would close more than she holds.
+    if (position.stopCloid) {
+      try { await this.config.venue.cancel(asset, position.stopCloid); }
+      catch (error) { this.log(`${asset}: could not cancel old stop — ${(error as Error).message}`); }
+    }
+
+    const cloid = deriveCloid(`${position.decisionId}:stop`, position.stopCloid ? 1 : 0);
     await this.config.venue.placeStop({
       asset,
       side: position.side === "long" ? "short" : "long",
@@ -360,7 +529,7 @@ export class Agent {
       size: position.size,
       cloid,
     });
-    this.config.store.attachStop(positionId, cloid);
+    this.config.store.attachStop(positionId, cloid, trigger);
     this.log(`${asset}: stop resting at ${trigger}`);
     return cloid;
   }
@@ -459,6 +628,18 @@ export class Agent {
   private log(line: string): void {
     (this.config.log ?? ((l: string) => process.stdout.write(`${l}\n`)))(line);
   }
+}
+
+/**
+ * Realised PnL on a closed position, before fees.
+ *
+ * Fees are added by the caller rather than netted here, because the ledger
+ * reports pnl and fees as separate fields and a figure that silently includes
+ * costs cannot be checked against the venue's own numbers.
+ */
+function realisedPnl(p: { side: "long" | "short"; size: string; entryPx: string }, exitPx: string): string {
+  const move = Number(exitPx) - Number(p.entryPx);
+  return String((p.side === "long" ? move : -move) * Number(p.size));
 }
 
 /** Strategy identity: the full decision configuration, not just "which rules ran". */
