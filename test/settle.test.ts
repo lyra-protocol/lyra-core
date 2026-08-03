@@ -310,3 +310,45 @@ describe("a position can only be exited once", () => {
     expect(restingExitFor([{ asset: "BTC", reduceOnly: true }], "BTC")).toBeDefined();
   });
 });
+
+describe("the daily loss breaker has a real baseline", () => {
+  it("measures the day against what the session opened with, not against now", () => {
+    // The bug this replaces: readRiskState called emptyState(currentEquity),
+    // which sets sessionStartEquityUsd = equityUsd. The guard then computes
+    // (E - E) / E, so the 7% breaker read exactly 0% drawdown forever and
+    // could never fire. It was dead from the day it was written.
+    const s = store();
+    const midnight = new Date().setUTCHours(0, 0, 0, 0);
+
+    // Yesterday: +200 realised, 10 in fees. Today: -500 realised, 5 in fees.
+    const seed = (closedAt: number, pnl: string, fees: string) => {
+      const id = s.openPosition({
+        asset: "BTC", decisionId: `d${closedAt}`, reasoningId: null, side: "long",
+        size: "0.01", entryPx: "63000", openedAt: closedAt - 1000, stopCloid: null, fees,
+      });
+      s.closePosition(id, { closedAt, exitPx: "63000", pnl, fees });
+    };
+    seed(midnight - 3_600_000, "200", "10");
+    seed(midnight + 3_600_000, "-500", "5");
+
+    const r = s.realisedAround(midnight);
+    expect(r.beforePnl).toBe(200);
+    expect(r.beforeFees).toBe(10);
+    expect(r.sincePnl).toBe(-500);
+    expect(r.sinceFees).toBe(5);
+
+    // Session opened at 10,000 + 200 - 10 = 10,190.
+    const sessionStart = 10_000 + r.beforePnl - r.beforeFees;
+    expect(sessionStart).toBe(10_190);
+
+    // Equity now, after today's loss: 10,190 - 500 - 5 = 9,685.
+    const equityNow = sessionStart + r.sincePnl - r.sinceFees;
+    const drawdown = (sessionStart - equityNow) / sessionStart;
+
+    // ~4.96% — a real figure, and one that will cross 7% if the day worsens.
+    expect(drawdown).toBeGreaterThan(0.049);
+    expect(drawdown).toBeLessThan(0.05);
+    // The old code produced this instead, for any loss of any size.
+    expect(drawdown).not.toBe(0);
+  });
+});

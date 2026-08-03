@@ -201,6 +201,62 @@ export function createColdServer(config: ServeConfig) {
     },
 
     /**
+     * What she has actually done: closed trades, newest first.
+     *
+     * The decision feed shows what she thought. This shows what it was worth.
+     * Separated because a terminal that only shows open risk lets a run look
+     * good by never closing anything, and one that only shows reasoning never
+     * has to be right.
+     */
+    "/api/trades": async (url) => {
+      if (!execDb) return { trades: [], realisedUsd: 0, feesUsd: 0, wins: 0, losses: 0 };
+      const limit = Math.min(Number(url.searchParams.get("limit") ?? 40), 200);
+      const rows = execDb
+        .prepare(
+          `SELECT asset, side, size, entry_px, exit_px, pnl, fees, opened_at, closed_at,
+                  reasoning_id, recorded_arweave_id
+             FROM position WHERE closed_at IS NOT NULL
+            ORDER BY closed_at DESC LIMIT ?`,
+        )
+        .all(limit) as Record<string, unknown>[];
+
+      const totals = execDb
+        .prepare(
+          `SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0) AS p,
+                  COALESCE(SUM(CAST(fees AS REAL)), 0) AS f,
+                  SUM(CASE WHEN CAST(pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS w,
+                  SUM(CASE WHEN CAST(pnl AS REAL) <= 0 THEN 1 ELSE 0 END) AS l
+             FROM position WHERE closed_at IS NOT NULL`,
+        )
+        .get() as { p: number; f: number; w: number | null; l: number | null };
+
+      return {
+        trades: rows.map((r) => ({
+          asset: r.asset as string,
+          side: r.side as "long" | "short",
+          size: r.size as string,
+          entryPx: r.entry_px as string,
+          exitPx: r.exit_px as string,
+          // Net is what actually reached the account. Gross and fees are both
+          // kept so the figure can be checked rather than trusted.
+          pnlUsd: Number(r.pnl),
+          feesUsd: Number(r.fees),
+          netUsd: Number(r.pnl) - Number(r.fees),
+          openedAt: r.opened_at as number,
+          closedAt: r.closed_at as number,
+          heldMs: (r.closed_at as number) - (r.opened_at as number),
+          reasoningId: (r.reasoning_id as string | null) ?? null,
+          recordId: (r.recorded_arweave_id as string | null) ?? null,
+        })),
+        realisedUsd: totals.p,
+        feesUsd: totals.f,
+        netUsd: totals.p - totals.f,
+        wins: totals.w ?? 0,
+        losses: totals.l ?? 0,
+      };
+    },
+
+    /**
      * What she has decided.
      *
      * Empty until the agent loop runs. The UI is required to say so rather than

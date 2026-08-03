@@ -49,6 +49,15 @@ export type AgentConfig = {
   limits?: Limits;
   /** Fraction of equity risked per trade, which sets the stop distance. */
   riskPerTrade?: number;
+  /**
+   * Capital the account began with, before any trade.
+   *
+   * The reference the daily breaker is measured against, reconstructed each
+   * cycle as `starting + everything realised before today`. It cannot come from
+   * the venue: `equityUsd()` reports equity *now*, and using that as the
+   * session baseline makes the drawdown identically zero.
+   */
+  startingEquityUsd: number;
   book: (asset: string) => Promise<{ bid: string; ask: string; ts: number }>;
   mids: () => Promise<Record<string, string>>;
   openInterestUsd: (asset: string) => Promise<number | null>;
@@ -681,6 +690,15 @@ export class Agent {
   private async readRiskState(): Promise<RiskState> {
     const equity = await this.config.venue.equityUsd();
     const state = emptyState(equity, this.config.universe);
+
+    // Sessions roll at UTC midnight. Measuring from the session's opening
+    // equity rather than the intraday peak means a profitable but volatile day
+    // is not halted for giving back part of a gain — but it only works if the
+    // opening figure is genuinely from this morning, not from this instant.
+    const midnight = new Date().setUTCHours(0, 0, 0, 0);
+    const r = this.config.store.realisedAround(midnight);
+    state.sessionStartEquityUsd = this.config.startingEquityUsd + r.beforePnl - r.beforeFees;
+    state.feesPaidTodayUsd = r.sinceFees;
     for (const p of this.config.store.openPositions()) {
       const notional = Number(p.size) * Number(p.entryPx);
       state.positions.set(p.asset, {

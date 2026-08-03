@@ -331,6 +331,28 @@ export class ExecutionStore {
     ).map(rowToPosition);
   }
 
+  /**
+   * Realised pnl and fees, split either side of a moment.
+   *
+   * The daily breaker needs the equity the session *opened* with, which is not
+   * a number any venue reports — it has to be reconstructed from what closed
+   * before today. Getting this from `equityUsd()` at the time of the call is
+   * what made the breaker measure zero drawdown forever.
+   */
+  realisedAround(sinceMs: number): { beforePnl: number; beforeFees: number; sincePnl: number; sinceFees: number } {
+    const q = (where: string) =>
+      this.db
+        .prepare(
+          `SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0) AS p,
+                  COALESCE(SUM(CAST(fees AS REAL)), 0) AS f
+             FROM position WHERE closed_at IS NOT NULL AND ${where}`,
+        )
+        .get(sinceMs) as { p: number; f: number };
+    const before = q("closed_at < ?");
+    const since = q("closed_at >= ?");
+    return { beforePnl: before.p, beforeFees: before.f, sincePnl: since.p, sinceFees: since.f };
+  }
+
   positionByAsset(asset: string): StoredPosition | undefined {
     const r = this.db
       .prepare(`SELECT * FROM position WHERE asset = ? AND closed_at IS NULL`)

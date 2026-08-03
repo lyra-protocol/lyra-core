@@ -68,6 +68,7 @@ const agent = new Agent({
   universe: UNIVERSE,
   venue,
   store,
+  startingEquityUsd: EQUITY,
   recorder: new Recorder({
     // Off chain: the key is never used to sign anything in this mode.
     key: { publicKey: "paper", seed: new Uint8Array(32), irysWallet: "paper" },
