@@ -1,0 +1,38 @@
+# Lyra cold path — read-only view of what she can see.
+#
+# Separate unit from the harvester so a flood of requests cannot starve
+# collection, and so this process can be restarted without interrupting the
+# dataset. Holds no key and opens the database read-only.
+[Unit]
+Description=Lyra cold path (read-only API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lyra
+Group=lyra
+WorkingDirectory=/opt/lyra/lyra-core
+Environment=NODE_ENV=production
+Environment=LYRA_DB=/opt/lyra/data/venue.db
+Environment=LYRA_SERVE_PORT=8788
+Environment=LYRA_ALLOWED_ORIGINS=https://www.lyrabuild.xyz,https://lyrabuild.xyz,http://localhost:3000
+ExecStart=/opt/lyra/node/bin/node /opt/lyra/lyra-core/dist/serve-main.js
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/lyra/data
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+MemoryMax=512M
+CPUQuota=25%
+
+StandardOutput=append:/opt/lyra/data/serve.log
+StandardError=append:/opt/lyra/data/serve.log
+
+[Install]
+WantedBy=multi-user.target
