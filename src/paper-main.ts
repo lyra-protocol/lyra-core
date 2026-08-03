@@ -103,6 +103,24 @@ const agent = new Agent({
   log,
 });
 
+/*
+ * Restore the venue before reconciling.
+ *
+ * The store survived the restart and the in-memory venue did not, so without
+ * this every open position reads as closed-while-down and equity resets to its
+ * starting figure. Neither happened; the process simply stopped.
+ */
+{
+  const open = store.openPositions();
+  const totals = store.realisedAround(0);
+  venue.adopt({
+    positions: open,
+    realisedPnl: totals.sincePnl,
+    feesPaid: totals.sinceFees + open.reduce((t, p) => t + Number(p.fees ?? 0), 0),
+  });
+  if (open.length > 0) log(`restored ${open.length} open position(s) from the store`);
+}
+
 const started = await agent.start();
 if (!started.ok) {
   log(`REFUSED TO START: ${started.detail}`);

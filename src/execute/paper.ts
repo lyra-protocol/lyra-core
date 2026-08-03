@@ -290,6 +290,39 @@ export class PaperVenue implements Venue {
     };
   }
 
+  /**
+   * Restores state the process was holding when it stopped.
+   *
+   * The paper venue keeps its book in memory, so a restart wipes positions,
+   * realised pnl and fees while the store keeps all three. Reconciliation then
+   * reports every open position as closed-while-down and the account resets to
+   * its starting equity — neither of which happened.
+   *
+   * Live has no equivalent because Hyperliquid remembers. This is the paper
+   * venue earning the right to be compared with it: same interface, same
+   * behaviour across a restart.
+   *
+   * Resting orders and stops are deliberately *not* restored. They were never
+   * really at a venue, and reconciliation re-attaches the protective stops from
+   * the store on the next pass.
+   */
+  adopt(state: {
+    positions: readonly { asset: string; side: "long" | "short"; size: string; entryPx: string; openedAt: number }[];
+    realisedPnl: number;
+    feesPaid: number;
+  }): void {
+    for (const p of state.positions) {
+      this.open.set(p.asset, {
+        asset: p.asset,
+        size: Number(p.size) * (p.side === "long" ? 1 : -1),
+        entryPx: Number(p.entryPx),
+        openedAt: p.openedAt,
+      });
+    }
+    this.realisedPnl = state.realisedPnl;
+    this.feesPaid = state.feesPaid;
+  }
+
   private applyFill(
     asset: string,
     side: "long" | "short",

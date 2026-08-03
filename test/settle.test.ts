@@ -352,3 +352,43 @@ describe("the daily loss breaker has a real baseline", () => {
     expect(drawdown).not.toBe(0);
   });
 });
+
+describe("a restart does not invent or lose positions", () => {
+  it("restores the venue from the store, so nothing reads as closed-while-down", async () => {
+    // The paper venue keeps its book in memory. Without adopt(), a restart left
+    // the store holding four open positions the venue had never heard of, and
+    // equity snapped back to its starting figure. Observed live.
+    const s = store();
+    const { v, play } = tapeVenue();
+    await restOrder(v, s, { decisionId: "d1", price: "63400.0", size: "0.01" });
+    play([{ px: "63399.0", sz: "1", time: NOW + 1000 }]);
+    await agentOn(v, s).settle();
+
+    const before = s.openPositions();
+    expect(before).toHaveLength(1);
+
+    // The process restarts: a fresh venue, the same store.
+    const fresh = paperVenue();
+    expect(await fresh.positions()).toHaveLength(0);
+
+    fresh.adopt({ positions: before, realisedPnl: 0, feesPaid: 0 });
+
+    const after = await fresh.positions();
+    expect(after).toHaveLength(1);
+    expect(after[0]!.asset).toBe("BTC");
+    // Long is a positive signed size; getting this backwards would flip her.
+    expect(Number(after[0]!.szi)).toBeGreaterThan(0);
+    expect(Number(after[0]!.entryPx)).toBeCloseTo(63400, 4);
+  });
+
+  it("carries realised pnl and fees across, so equity does not reset", async () => {
+    const s = store();
+    const fresh = paperVenue();
+    const startEquity = await fresh.equityUsd();
+
+    fresh.adopt({ positions: [], realisedPnl: -250, feesPaid: 30 });
+
+    expect(await fresh.equityUsd()).toBeCloseTo(startEquity - 280, 6);
+    void s;
+  });
+});
