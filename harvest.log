@@ -82,3 +82,34 @@
 [2026-08-03T00:38:13.004Z] socket closed, reconnecting in 2s
 [2026-08-03T00:38:15.832Z] connected, watching 8 assets
 [2026-08-03T00:38:57.803Z] addresses 3595 (3594 polled) | open 23365 | changes logged 58138 | closures 914 | polls 10751 | reconnects 1
+[2026-08-03T00:39:57.848Z] addresses 3631 (3628 polled) | open 23486 | changes logged 58490 | closures 935 | polls 10892 | reconnects 1
+[2026-08-03T00:40:57.887Z] addresses 3659 (3655 polled) | open 23730 | changes logged 59313 | closures 947 | polls 11035 | reconnects 1
+[2026-08-03T00:41:57.935Z] addresses 3684 (3680 polled) | open 23871 | changes logged 60269 | closures 962 | polls 11176 | reconnects 1
+[2026-08-03T00:42:57.985Z] addresses 3710 (3709 polled) | open 24019 | changes logged 61129 | closures 974 | polls 11317 | reconnects 1
+[2026-08-03T00:43:58.069Z] addresses 3729 (3723 polled) | open 24074 | changes logged 61533 | closures 997 | polls 11458 | reconnects 1
+[2026-08-03T00:44:58.116Z] addresses 3756 (3755 polled) | open 24235 | changes logged 62188 | closures 1020 | polls 11600 | reconnects 1
+[2026-08-03T00:45:58.163Z] addresses 3783 (3779 polled) | open 24397 | changes logged 63137 | closures 1048 | polls 11736 | reconnects 1
+[2026-08-03T00:46:58.200Z] addresses 3821 (3813 polled) | open 24697 | changes logged 63799 | closures 1072 | polls 11873 | reconnects 1
+[2026-08-03T00:47:58.248Z] addresses 3855 (3853 polled) | open 24955 | changes logged 64463 | closures 1082 | polls 12015 | reconnects 1
+[2026-08-03T00:48:58.300Z] addresses 3874 (3873 polled) | open 24983 | changes logged 64903 | closures 1096 | polls 12152 | reconnects 1
+[2026-08-03T00:49:58.337Z] addresses 3886 (3884 polled) | open 25016 | changes logged 65484 | closures 1124 | polls 12296 | reconnects 1
+[2026-08-03T00:50:58.385Z] addresses 3920 (3919 polled) | open 25131 | changes logged 65875 | closures 1141 | polls 12440 | reconnects 1
+[2026-08-03T00:51:58.438Z] addresses 3941 (3937 polled) | open 25238 | changes logged 66537 | closures 1157 | polls 12580 | reconnects 1
+[2026-08-03T00:52:58.484Z] addresses 3951 (3951 polled) | open 25291 | changes logged 67101 | closures 1169 | polls 12722 | reconnects 1
+[2026-08-03T00:53:25.326Z] socket closed, reconnecting in 2s
+[2026-08-03T00:53:28.246Z] connected, watching 8 assets
+[2026-08-03T00:53:58.531Z] addresses 3967 (3967 polled) | open 25345 | changes logged 67632 | closures 1193 | polls 12862 | reconnects 2
+[2026-08-03T00:54:58.588Z] addresses 3984 (3983 polled) | open 25366 | changes logged 67927 | closures 1212 | polls 13012 | reconnects 2
+[2026-08-03T00:55:58.640Z] addresses 3995 (3994 polled) | open 25380 | changes logged 68268 | closures 1221 | polls 13157 | reconnects 2
+[2026-08-03T00:56:58.697Z] addresses 4008 (4008 polled) | open 25412 | changes logged 68858 | closures 1224 | polls 13296 | reconnects 2
+[2026-08-03T00:57:58.749Z] addresses 4021 (4019 polled) | open 25446 | changes logged 69509 | closures 1230 | polls 13437 | reconnects 2
+[2026-08-03T00:58:58.804Z] addresses 4042 (4041 polled) | open 25484 | changes logged 70016 | closures 1236 | polls 13572 | reconnects 2
+[2026-08-03T00:59:58.901Z] addresses 4060 (4060 polled) | open 25580 | changes logged 70540 | closures 1247 | polls 13714 | reconnects 2
+[2026-08-03T01:00:58.964Z] addresses 4146 (4141 polled) | open 25767 | changes logged 71089 | closures 1253 | polls 13853 | reconnects 2
+[2026-08-03T01:01:59.038Z] addresses 4182 (4178 polled) | open 25877 | changes logged 71547 | closures 1259 | polls 13996 | reconnects 2
+[2026-08-03T01:02:59.099Z] addresses 4216 (4215 polled) | open 26065 | changes logged 72016 | closures 1267 | polls 14143 | reconnects 2
+[2026-08-03T01:03:59.160Z] addresses 4230 (4230 polled) | open 26086 | changes logged 72169 | closures 1269 | polls 14285 | reconnects 2
+[2026-08-03T01:04:59.220Z] addresses 4248 (4248 polled) | open 26103 | changes logged 72615 | closures 1283 | polls 14426 | reconnects 2
+[2026-08-03T01:05:59.280Z] addresses 4268 (4265 polled) | open 26112 | changes logged 73642 | closures 1293 | polls 14556 | reconnects 2
+[2026-08-03T01:06:59.343Z] addresses 4279 (4279 polled) | open 26181 | changes logged 74055 | closures 1298 | polls 14700 | reconnects 2
+[2026-08-03T01:07:59.402Z] addresses 4322 (4312 polled) | open 26267 | changes logged 74905 | closures 1310 | polls 14841 | reconnects 2
