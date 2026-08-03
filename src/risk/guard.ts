@@ -48,6 +48,8 @@ export type RefusalCode =
   | "would_cross_spread"
   | "not_reduce_only"
   | "no_position_to_reduce"
+  /** A close for this asset is already resting. A second one flips the side. */
+  | "exit_already_resting"
   | "malformed";
 
 export type Refusal = { ok: false; code: RefusalCode; detail: string };

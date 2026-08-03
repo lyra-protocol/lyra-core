@@ -415,6 +415,7 @@ export class Agent {
       const pnl = realisedPnl(stopped, px);
       const fees = String(Number(stopped.fees ?? "0") + Number(fill.fee));
       this.config.store.closePosition(stopped.id, { closedAt: fill.at, exitPx: px, pnl, fees });
+      await this.cancelRestingFor(asset, stopped, fill.cloid);
       this.log(`${asset}: STOPPED OUT at ${px}, pnl ${pnl}`);
       return { asset, result: "closed", positionId: stopped.id, px, pnl, why: "stop" };
     }
@@ -441,6 +442,7 @@ export class Agent {
       const pnl = realisedPnl(open, px);
       const fees = String(Number(open.fees ?? "0") + Number(fill.fee));
       this.config.store.closePosition(open.id, { closedAt: fill.at, exitPx: px, pnl, fees });
+      await this.cancelRestingFor(asset, open, fill.cloid);
       this.log(`${asset}: closed at ${px}, pnl ${pnl}`);
       return { asset, result: "closed", positionId: open.id, px, pnl, why: "exit" };
     }
@@ -481,6 +483,52 @@ export class Agent {
     await this.placeProtectiveStop(positionId, asset);
     this.log(`${asset}: opened ${intent.side} ${fill.filledSize} at ${px}`);
     return { asset, result: "opened", positionId, size: fill.filledSize, px };
+  }
+
+  /**
+   * Cancels everything still resting for an asset she is no longer in.
+   *
+   * A position closes by one route, but it can be *closed by* three: the stop
+   * triggers, a maker exit fills, or reconciliation flattens it. Whichever one
+   * wins, the other orders are still live at the venue — and a reduce-only
+   * order with nothing to reduce does not expire harmlessly, it opens the
+   * opposite side at full size.
+   *
+   * This is the same failure that put her long 0.70 ETH at 1847 with no
+   * decision behind it, reached from a different direction, so it is cleaned up
+   * where every close converges rather than at each call site.
+   */
+  private async cancelRestingFor(
+    asset: string,
+    position: { stopCloid: string | null },
+    exceptCloid: string,
+  ): Promise<void> {
+    const cancel = async (cloid: string, what: string) => {
+      try {
+        await this.config.venue.cancel(asset, cloid);
+        this.log(`${asset}: cancelled ${what}`);
+      } catch (error) {
+        // Worth shouting about: a stop left resting on a flat account is the
+        // exact condition this method exists to prevent.
+        this.log(`${asset}: COULD NOT CANCEL ${what} — ${(error as Error).message}`);
+      }
+    };
+
+    if (position.stopCloid && position.stopCloid !== exceptCloid) {
+      await cancel(position.stopCloid, "protective stop");
+    }
+    for (const i of this.config.store.unresolvedIntents()) {
+      if (i.asset !== asset || !i.reduceOnly || i.cloid === exceptCloid) continue;
+      await cancel(i.cloid, `resting exit at ${i.price}`);
+      this.config.store.updateIntent(i.cloid, {
+        status: "cancelled",
+        venueOrderId: i.venueOrderId,
+        filledSize: i.filledSize,
+        avgFillPx: i.avgFillPx,
+        fee: i.fee,
+        detail: "position already closed",
+      });
+    }
   }
 
   /** Serialises settle and cycle; they both write the store and place orders. */
@@ -538,6 +586,28 @@ export class Agent {
     const position = this.config.store.positionByAsset(asset);
     if (!position) {
       return { asset, result: "refused", code: "no_position_to_reduce", detail: "nothing open" };
+    }
+
+    /*
+     * One exit at a time.
+     *
+     * An exit is maker-only like everything else, so it rests — and she may
+     * reach the same conclusion again on the next cycle while it is still
+     * resting. Two reduce-only orders for one position do not cancel each
+     * other: the first flattens her and the second opens the opposite side at
+     * full size. Observed live, on ETH: closed at 1847, then immediately long
+     * 0.70 ETH that no decision asked for.
+     *
+     * Nothing downstream can undo this. The venue applies both fills before
+     * anything here sees either, so the only place it can be prevented is
+     * before the second order is sent.
+     */
+    const exiting = restingExitFor(this.config.store.unresolvedIntents(), asset);
+    if (exiting) {
+      return {
+        asset, result: "refused", code: "exit_already_resting",
+        detail: `a close for ${asset} is already resting at ${exiting.price}`,
+      };
     }
     const b = await this.config.book(asset);
     const side = position.side === "long" ? "short" : "long";
@@ -628,6 +698,21 @@ export class Agent {
   private log(line: string): void {
     (this.config.log ?? ((l: string) => process.stdout.write(`${l}\n`)))(line);
   }
+}
+
+/**
+ * The exit already working for an asset, if there is one.
+ *
+ * Exported because it is the whole of a rule that cost a real position: two
+ * reduce-only orders for one position do not net off, they reverse it. A rule
+ * that can only be reached through a full decision cycle is a rule that is
+ * never tested directly.
+ */
+export function restingExitFor<T extends { asset: string; reduceOnly: boolean }>(
+  intents: readonly T[],
+  asset: string,
+): T | undefined {
+  return intents.find((i) => i.asset === asset && i.reduceOnly);
 }
 
 /**

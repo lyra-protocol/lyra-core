@@ -19,7 +19,7 @@ import { PaperVenue } from "../src/execute/paper.js";
 import { ExecutionStore } from "../src/execute/store.js";
 import { approveMaker, type OrderIntent } from "../src/orders.js";
 import { deriveCloid } from "../src/execute/venue.js";
-import { Agent } from "../src/agent.js";
+import { Agent, restingExitFor } from "../src/agent.js";
 import { DatabaseSync } from "node:sqlite";
 
 const NOW = 1_785_600_000_000;
@@ -240,5 +240,73 @@ describe("fills that belong to nothing", () => {
     const outcomes = await agentOn(v, s2).settle();
 
     expect(outcomes.map((o) => o.result)).toEqual(["orphan"]);
+  });
+});
+
+describe("a position can only be exited once", () => {
+  it("cancels the stop when a maker exit fills", async () => {
+    // The stop is reduce-only. Left resting on a flat account it does not
+    // expire — it opens the opposite side at full size the moment it triggers.
+    const s = store();
+    const { v, play } = tapeVenue();
+    const agent = agentOn(v, s);
+
+    await restOrder(v, s, { decisionId: "d1", price: "63400.0", size: "0.01" });
+    play([{ px: "63399.0", sz: "1", time: NOW + 1000 }]);
+    await agent.settle();
+    const stopCloid = s.openPositions()[0]!.stopCloid!;
+    expect(await v.cancel("BTC", stopCloid)).toBe(true); // it is resting
+
+    // Re-attach and exit through a reduce-only maker order.
+    await v.placeStop({
+      asset: "BTC", side: "short", triggerPx: "60000.0", size: "0.01", cloid: stopCloid,
+    });
+    await restOrder(v, s, {
+      decisionId: "d2", side: "short", price: "63500.0", size: "0.01", reduceOnly: true,
+    });
+    play([{ px: "63501.0", sz: "1", time: NOW + 2000 }]);
+    const outcomes = await agent.settle();
+
+    expect(outcomes.map((o) => o.result)).toEqual(["closed"]);
+    expect(s.openPositions()).toHaveLength(0);
+    // Nothing left behind: cancelling again finds nothing to cancel.
+    expect(await v.cancel("BTC", stopCloid)).toBe(false);
+  });
+
+  it("refuses a second close while one is already resting", async () => {
+    // Observed live on ETH: two reduce-only orders for one position filled in
+    // the same pass. The first flattened her, the second opened the opposite
+    // side — 0.70 ETH long that no decision asked for.
+    const s = store();
+    const { v, play } = tapeVenue();
+    const agent = agentOn(v, s);
+
+    await restOrder(v, s, { decisionId: "d1", price: "63400.0", size: "0.01" });
+    play([{ px: "63399.0", sz: "1", time: NOW + 1000 }]);
+    await agent.settle();
+
+    // No exit working yet, so a close is allowed.
+    expect(restingExitFor(s.unresolvedIntents(), "BTC")).toBeUndefined();
+
+    await restOrder(v, s, {
+      decisionId: "d2", side: "short", price: "63500.0", size: "0.01", reduceOnly: true,
+    });
+
+    // Now one is working, and a second must be refused.
+    const blocking = restingExitFor(s.unresolvedIntents(), "BTC");
+    expect(blocking).toBeDefined();
+    expect(blocking!.price).toBe("63500.0");
+  });
+
+  it("does not confuse an entry for an exit, or another asset's exit", async () => {
+    const s = store();
+    const { v } = tapeVenue();
+    await restOrder(v, s, { decisionId: "e1", price: "63400.0", size: "0.01" });
+
+    // An entry is not an exit.
+    expect(restingExitFor(s.unresolvedIntents(), "BTC")).toBeUndefined();
+    // Nor is another asset's.
+    expect(restingExitFor([{ asset: "ETH", reduceOnly: true }], "BTC")).toBeUndefined();
+    expect(restingExitFor([{ asset: "BTC", reduceOnly: true }], "BTC")).toBeDefined();
   });
 });
