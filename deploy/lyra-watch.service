@@ -1,0 +1,45 @@
+# The watchdog.
+#
+# Its own unit on purpose. An alerter running inside lyra-paper goes silent at
+# the exact moment it is needed — when lyra-paper dies — so this only ever reads
+# from the outside: systemd, the collector's HTTP surface, and the log file.
+#
+# It holds no key, opens no database and never writes to /opt/lyra/lyra-core.
+# The only path it writes is its own alert state.
+[Unit]
+Description=Lyra watchdog (alerting)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lyra
+Group=lyra
+WorkingDirectory=/opt/lyra/lyra-core
+EnvironmentFile=/opt/lyra/lyra.env
+Environment=NODE_ENV=production
+Environment=LYRA_WATCH_COLLECTOR=http://127.0.0.1:8788
+Environment=LYRA_WATCH_LOG=/opt/lyra/data/paper.log
+Environment=LYRA_WATCH_STATE=/opt/lyra/data/alerts.json
+Environment=LYRA_WATCH_INTERVAL_MS=120000
+ExecStart=/opt/lyra/node/bin/node /opt/lyra/lyra-core/dist/watch-main.js
+# The watchdog restarting must be cheap and quiet; it is the last thing that
+# should need attention.
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/lyra/data
+# It reads systemd state, so it cannot be fully isolated from it, but it has no
+# capability to change anything.
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+
+StandardOutput=append:/opt/lyra/data/watch.log
+StandardError=append:/opt/lyra/data/watch.log
+
+[Install]
+WantedBy=multi-user.target
