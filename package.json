@@ -16,6 +16,9 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@irys/upload": "^0.0.15",
+    "@irys/upload-solana": "^0.1.8",
+    "@lyra-protocol/record": "file:../lyra-record",
     "ws": "^8.18.0"
   },
   "devDependencies": {
