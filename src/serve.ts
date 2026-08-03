@@ -191,6 +191,9 @@ export function createColdServer(config: ServeConfig) {
       return {
         trading: open.length > 0 || realisedAll !== 0,
         equityUsd: equity,
+        // The breaker measures the day against this, so the dollar value of
+        // the 7% floor is derivable rather than a percentage with no anchor.
+        sessionStartEquityUsd: sessionStart,
         notionalUsd: notional,
         unrealizedPnlUsd: unrealised,
         sessionPnlUsd: sessionPnl,
