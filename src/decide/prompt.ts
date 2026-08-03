@@ -65,7 +65,7 @@ before it has had time to happen. You may only close on invalidated or
 played_out; if the thesis is intact, hold it.
 
 Where you are given your own past results, they are your measured record, not a
-suggestion. Read them as evidence about your own behaviour.\`;
+suggestion. Read them as evidence about your own behaviour.`;
 
 export type Observation = { id: string; text: string };
 
