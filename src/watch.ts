@@ -217,3 +217,27 @@ export function toSend(
 
   return { send, resolved, nextState };
 }
+
+/**
+ * An HTTP header value that will actually send.
+ *
+ * Header values are ByteStrings — latin-1 — so a single em-dash throws rather
+ * than degrading. Found by testing delivery for real: the resolve notices and,
+ * far worse, `Daily loss limit reached — 7.00%` all failed to send while the
+ * plainer titles went through. The most important alert in the set was the one
+ * that would have been silently dropped.
+ *
+ * Typographic characters are folded to their ASCII equivalents rather than
+ * stripped, so a title stays readable instead of losing punctuation.
+ */
+export function headerSafe(value: string): string {
+  return value
+    .replace(/[\u2012-\u2015\u2212]/g, "-")
+    .replace(/[\u2018\u2019\u201B]/g, "'")
+    .replace(/[\u201C-\u201F]/g, '"')
+    .replace(/\u2026/g, "...")
+    .replace(/[\u00B7\u2022]/g, "-")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim()
+    .slice(0, 200);
+}

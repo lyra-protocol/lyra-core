@@ -12,7 +12,7 @@
 import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { DEFAULT_THRESHOLDS, evaluate, toSend, type Alert, type Observed } from "./watch.js";
+import { DEFAULT_THRESHOLDS, evaluate, headerSafe, toSend, type Alert, type Observed } from "./watch.js";
 
 const run = promisify(execFile);
 
@@ -110,7 +110,7 @@ async function send(alert: Alert): Promise<void> {
       method: "POST",
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
-        Title: `Lyra: ${alert.title}`,
+        Title: headerSafe(`Lyra: ${alert.title}`),
         Priority: alert.severity === "critical" ? "urgent" : "default",
         Tags: alert.severity === "critical" ? "rotating_light" : "warning",
       },
@@ -146,7 +146,7 @@ async function tick(): Promise<void> {
     await send({
       id: `${id}:resolved`,
       severity: "warning",
-      title: `resolved — ${id}`,
+      title: `resolved: ${id}`,
       detail: "This condition is no longer present.",
     });
   }
