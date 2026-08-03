@@ -15,7 +15,7 @@ Group=lyra
 WorkingDirectory=/opt/lyra/lyra-core
 Environment=NODE_ENV=production
 Environment=LYRA_DB=/opt/lyra/data/venue.db
-ExecStart=/usr/bin/node /opt/lyra/lyra-core/dist/main.js
+ExecStart=/opt/lyra/node/bin/node /opt/lyra/lyra-core/dist/main.js
 
 # A gap in the dataset cannot be backfilled, so it always comes back.
 Restart=always
