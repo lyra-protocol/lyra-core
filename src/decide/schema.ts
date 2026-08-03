@@ -44,6 +44,8 @@ export const DECISION_JSON_SCHEMA = {
       "forced_orders_are",
       "hypothesis",
       "action",
+      "target_px",
+      "thesis_status",
       "expected_move",
       "conviction",
       "reasoning",
@@ -76,6 +78,39 @@ export const DECISION_JSON_SCHEMA = {
         type: "string",
         enum: ["open_long", "open_short", "hold", "close"],
       },
+      /*
+       * The price that makes the hypothesis falsifiable.
+       *
+       * "Price is drawn to the cluster" is not a claim until it names which
+       * cluster and at what price. Without this the position has no exit except
+       * the model's nerve, which is what produced average winners of +$0.85
+       * against average losers of −$6.08.
+       */
+      target_px: {
+        type: "number",
+        description:
+          "If opening: the price you expect to be reached if your hypothesis is right — " +
+          "normally the liquidation cluster you are trading toward. This is the exit. " +
+          "Use 0 when not opening a position.",
+      },
+      /*
+       * The gate on exits, and the mirror of the gate on entries.
+       *
+       * §4.1 established that forcing premises before the action changes the
+       * answer. The same applies leaving a trade: without naming what happened
+       * to the thesis, "close" collapses into "this is currently red", and a
+       * −0.3% move on a position whose stop is 11% away reads as being wrong.
+       */
+      thesis_status: {
+        type: "string",
+        enum: ["no_position", "intact", "invalidated", "played_out"],
+        description:
+          "If a position is open, what has happened to the reasoning that opened it. " +
+          "intact: the original thesis still holds and has not yet played out — an " +
+          "adverse price move is NOT invalidation. invalidated: the forced flow you " +
+          "traded toward is gone, or the losing side has changed. played_out: the target " +
+          "was reached or the mechanism has finished. Use no_position when flat.",
+      },
       expected_move: {
         type: "number",
         description: "Expected move as a fraction, e.g. 0.012 for 1.2%. Zero when holding.",
@@ -101,6 +136,9 @@ export type Decision = {
   forced_orders_are: "buys_above_spot" | "sells_below_spot" | "mixed";
   hypothesis: "magnet" | "wall" | "cascade" | "none";
   action: "open_long" | "open_short" | "hold" | "close";
+  /** The price that would prove the hypothesis. 0 when not opening. */
+  target_px: number;
+  thesis_status: "no_position" | "intact" | "invalidated" | "played_out";
   expected_move: number;
   conviction: number;
   reasoning: string;
@@ -149,6 +187,7 @@ export function validateDecision(
     ["forced_orders_are", ["buys_above_spot", "sells_below_spot", "mixed"]],
     ["hypothesis", ["magnet", "wall", "cascade", "none"]],
     ["action", ["open_long", "open_short", "hold", "close"]],
+    ["thesis_status", ["no_position", "intact", "invalidated", "played_out"]],
   ];
   for (const [field, allowed] of enums) {
     if (typeof d[field] !== "string" || !allowed.includes(d[field] as string)) {
@@ -174,6 +213,44 @@ export function validateDecision(
   // would size a position against a number nobody should believe.
   if (Math.abs(d.expected_move) > 0.5) {
     return fail("out_of_range", `expected_move of ${d.expected_move} is implausible for a perp`);
+  }
+  if (typeof d.target_px !== "number" || !Number.isFinite(d.target_px) || d.target_px < 0) {
+    return fail("out_of_range", `target_px must be a non-negative finite number, got ${d.target_px}`);
+  }
+
+  /*
+   * An opening trade must name the price that would prove it right.
+   *
+   * The hypothesis is a claim about where price goes; a claim with no price is
+   * not falsifiable and, more practically, leaves the position with no exit but
+   * the model's nerve. Measured over the first ten closed trades, that produced
+   * average winners of +$0.85 against average losers of −$6.08 — winners cut at
+   * +0.05% while the thesis called for 1–4%.
+   */
+  if ((d.action === "open_long" || d.action === "open_short") && d.target_px === 0) {
+    return fail(
+      "schema_mismatch",
+      `${d.action} requires a target_px — the price that would prove the hypothesis right`,
+    );
+  }
+
+  /*
+   * Closing requires the thesis to have changed, not merely to be losing.
+   *
+   * The exit mirror of §4.1. Every loss in the first ten trades was a manual
+   * close on a move of roughly −0.4%, against a stop sitting ~11% away: the risk
+   * budget was never the thing being respected, nerve was. Naming what happened
+   * to the reasoning makes "it is red right now" an unavailable answer.
+   */
+  if (d.action === "close" && d.thesis_status === "intact") {
+    return fail(
+      "schema_mismatch",
+      "close requires thesis_status of invalidated or played_out. An adverse price " +
+        "move inside the stop is not invalidation — if the thesis is intact, hold it.",
+    );
+  }
+  if (d.action === "close" && d.thesis_status === "no_position") {
+    return fail("schema_mismatch", "close with thesis_status no_position — nothing is open");
   }
 
   const supplied = new Set(suppliedEventIds);

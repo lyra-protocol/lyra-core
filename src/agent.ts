@@ -25,6 +25,7 @@ import {
   buildUserPrompt,
   DEFAULT_QUESTION,
   painMapObservations,
+  performanceObservations,
   positionObservations,
   SYSTEM_PROMPT,
 } from "./decide/prompt.js";
@@ -211,6 +212,24 @@ export class Agent {
       losingSide: map.losingSide,
     });
 
+    /*
+     * A target reached is an exit, taken without consulting anyone.
+     *
+     * She named this price as the one that would prove her right. Asking the
+     * model again at that moment reintroduces exactly the discretion the target
+     * exists to remove — and over the first ten trades that discretion took
+     * winners at +0.05% against a thesis calling for 1-4%.
+     */
+    if (existing?.targetPx) {
+      const target = Number(existing.targetPx);
+      const mark = Number(map.midPx);
+      const reached = existing.side === "long" ? mark >= target : mark <= target;
+      if (Number.isFinite(target) && target > 0 && reached) {
+        this.log(`${asset}: target ${existing.targetPx} reached at ${map.midPx} — taking it`);
+        return await this.closePosition(asset, `${existing.decisionId}:target`);
+      }
+    }
+
     return await this.decideAndAct(asset, map, state, existing !== undefined);
   }
 
@@ -229,14 +248,22 @@ export class Agent {
             asset,
             side: p.side,
             entryPx: p.entryPx,
+            markPx: map.midPx,
             notionalUsd: Number(p.size) * Number(p.entryPx),
-            unrealizedPnlUsd: 0,
+            // Real, not zero. She was previously told every open position was
+            // flat, which made "is this working?" unanswerable.
+            unrealizedPnlUsd: unrealised(p, map.midPx),
             liquidationPx: null,
+            stopPx: p.stopPx,
+            targetPx: p.targetPx,
             openedAt: p.openedAt,
+            thesis: this.config.store.decisionById(p.decisionId),
           }),
         );
       }
     }
+
+    observations.push(...performanceObservations(this.config.store.recentClosures(20)));
 
     const decisionId = randomUUID();
     const consult = await this.config.client.consult({
@@ -487,6 +514,9 @@ export class Agent {
       openedAt: fill.at,
       stopCloid: null,
       fees: fill.fee,
+      // The price she said would prove her right. Without it the position has
+      // no exit but the model's nerve, which is what cut winners at +0.05%.
+      targetPx: targetPxFor(this.config.store, intent.decisionId),
     });
     // The most dangerous window in the system is between here and the stop.
     await this.placeProtectiveStop(positionId, asset);
@@ -716,6 +746,20 @@ export class Agent {
   private log(line: string): void {
     (this.config.log ?? ((l: string) => process.stdout.write(`${l}\n`)))(line);
   }
+}
+
+/** Unrealised PnL on an open position at the current mark. */
+function unrealised(p: { side: "long" | "short"; size: string; entryPx: string }, markPx?: string): number {
+  if (!markPx) return 0;
+  const move = Number(markPx) - Number(p.entryPx);
+  return (p.side === "long" ? move : -move) * Number(p.size);
+}
+
+/** The target named by the decision that opened a position, as a string. */
+function targetPxFor(store: ExecutionStore, decisionId: string): string | null {
+  const d = store.rawDecision(decisionId);
+  const t = d?.target_px;
+  return typeof t === "number" && t > 0 ? String(t) : null;
 }
 
 /**

@@ -20,6 +20,8 @@ import { ExecutionStore } from "../src/execute/store.js";
 import { approveMaker, type OrderIntent } from "../src/orders.js";
 import { deriveCloid } from "../src/execute/venue.js";
 import { Agent, restingExitFor } from "../src/agent.js";
+import { performanceObservations } from "../src/decide/prompt.js";
+import { validateDecision } from "../src/decide/schema.js";
 import { DatabaseSync } from "node:sqlite";
 
 const NOW = 1_785_600_000_000;
@@ -410,5 +412,106 @@ describe("a repaired stop keeps its trigger price", () => {
     // The number a position exists to answer: where does this end.
     expect(p.stopPx).not.toBeNull();
     expect(Number(p.stopPx)).toBeGreaterThan(0);
+  });
+});
+
+describe("she knows what she is holding and why", () => {
+  it("carries the target through to the position, so the exit has a price", async () => {
+    const s = store();
+    const { v, play } = tapeVenue();
+    const cloid = await restOrder(v, s, { decisionId: "d1", price: "63400.0", size: "0.01" });
+    // The decision that opened it named a target.
+    s.saveDecision({
+      id: "d1", at: NOW, asset: "BTC", action: "open_long", conviction: 0.6, expectedMove: 0.02,
+      auditJson: "{}",
+      decisionJson: JSON.stringify({
+        losing_side: "shorts", forced_orders_are: "buys_above_spot", hypothesis: "magnet",
+        reasoning: "Shorts liquidate into a cluster above spot.", target_px: 64800,
+      }),
+    });
+    play([{ px: "63399.0", sz: "1", time: NOW + 1000 }]);
+    await agentOn(v, s).settle();
+
+    const p = s.openPositions()[0]!;
+    expect(p.targetPx).toBe("64800");
+    void cloid;
+  });
+
+  it("hands back the reasoning that opened a position", async () => {
+    const s = store();
+    s.saveDecision({
+      id: "d9", at: NOW, asset: "BTC", action: "open_long", conviction: 0.6, expectedMove: 0.02,
+      auditJson: "{}",
+      decisionJson: JSON.stringify({
+        losing_side: "shorts", forced_orders_are: "buys_above_spot",
+        hypothesis: "cascade", reasoning: "A breach accelerates the move.",
+      }),
+    });
+    const t = s.decisionById("d9");
+    expect(t?.hypothesis).toBe("cascade");
+    expect(t?.reasoning).toContain("breach");
+    // The case that matters: a position whose decision is gone must not crash
+    // the cycle, it must simply carry no thesis.
+    expect(s.decisionById("missing")).toBeNull();
+  });
+});
+
+describe("her own record is fed back to her", () => {
+  it("names the disposition problem in her own numbers", () => {
+    const trades = [
+      { netUsd: 1, heldMs: 10 * 60_000, hypothesis: "magnet" },
+      { netUsd: -6, heldMs: 40 * 60_000, hypothesis: "magnet" },
+      { netUsd: -6, heldMs: 40 * 60_000, hypothesis: "wall" },
+    ];
+    const [summary, byHypothesis] = performanceObservations(trades);
+    expect(summary!.text).toContain("longer than");
+    // The breakeven arithmetic has to be stated, not implied.
+    expect(summary!.text).toMatch(/break even/);
+    expect(byHypothesis!.text).toContain("magnet");
+    expect(byHypothesis!.text).toContain("wall");
+  });
+
+  it("says nothing at all until there is something to learn from", () => {
+    // Two trades is noise. Reporting a 50% win rate off it would be inventing
+    // a finding, which is the thing she is forbidden from doing.
+    expect(performanceObservations([{ netUsd: 1, heldMs: 1000, hypothesis: null }])).toHaveLength(0);
+  });
+});
+
+describe("the exit gate", () => {
+  const base = {
+    observed: "x", losing_side: "longs", forced_orders_are: "sells_below_spot",
+    hypothesis: "magnet", expected_move: 0.02, conviction: 0.6,
+    // A trade must cite evidence — the grounding rule applies to exits too, so
+    // the fixture carries a real citation rather than testing around it.
+    reasoning: "y", evidence_event_ids: ["own_thesis"],
+  };
+  const parse = (d: Record<string, unknown>) =>
+    validateDecision(JSON.stringify(d), ["own_thesis", "pain_map"]);
+
+  it("refuses to close while the thesis is intact", () => {
+    // Every loss in the first ten trades was a manual close on roughly −0.4%,
+    // against a stop ~11% away. "It is red right now" is no longer an answer.
+    const r = parse({ ...base, action: "close", target_px: 0, thesis_status: "intact" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.failure.detail).toMatch(/invalidated or played_out/);
+  });
+
+  it("allows a close when the thesis is gone or finished", () => {
+    for (const status of ["invalidated", "played_out"]) {
+      const r = parse({ ...base, action: "close", target_px: 0, thesis_status: status });
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  it("refuses to open without naming the price that would prove it right", () => {
+    const r = parse({ ...base, action: "open_short", target_px: 0, thesis_status: "no_position" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.failure.detail).toMatch(/target_px/);
+  });
+
+  it("still allows a hold to name no target", () => {
+    const r = parse({ ...base, action: "hold", target_px: 0, thesis_status: "no_position" });
+    expect(r.ok).toBe(true);
   });
 });

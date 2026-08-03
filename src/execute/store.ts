@@ -57,6 +57,8 @@ export type StoredPosition = {
   stopCloid: string | null;
   /** Trigger price of that stop. Null when unprotected. */
   stopPx: string | null;
+  /** The price she said would prove the thesis. Null if none was named. */
+  targetPx: string | null;
   closedAt: number | null;
   exitPx: string | null;
   pnl: string | null;
@@ -126,6 +128,7 @@ export class ExecutionStore {
         opened_at     INTEGER NOT NULL,
         stop_cloid    TEXT,
         stop_px       TEXT,
+        target_px     TEXT,
         closed_at     INTEGER,
         exit_px       TEXT,
         pnl           TEXT,
@@ -140,7 +143,7 @@ export class ExecutionStore {
     // CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
     // so a column added after a database is in the field needs this. Cheap,
     // idempotent, and it runs before anything reads the column.
-    for (const [table, column, type] of [["position", "stop_px", "TEXT"]] as const) {
+    for (const [table, column, type] of [["position", "stop_px", "TEXT"], ["position", "target_px", "TEXT"]] as const) {
       const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!columns.some((c) => c.name === column)) {
         this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
@@ -234,15 +237,15 @@ export class ExecutionStore {
     ).map(rowToIntent);
   }
 
-  openPosition(p: Omit<StoredPosition, "id" | "closedAt" | "exitPx" | "pnl" | "recordedSequence" | "recordedArweaveId" | "stopPx">): number {
+  openPosition(p: Omit<StoredPosition, "id" | "closedAt" | "exitPx" | "pnl" | "recordedSequence" | "recordedArweaveId" | "stopPx" | "targetPx"> & { targetPx?: string | null }): number {
     const info = this.db
       .prepare(
         `INSERT INTO position
-           (asset, decision_id, reasoning_id, side, size, entry_px, opened_at, stop_cloid, fees)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (asset, decision_id, reasoning_id, side, size, entry_px, opened_at, stop_cloid, fees, target_px)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(p.asset, p.decisionId, p.reasoningId, p.side, p.size, p.entryPx, p.openedAt,
-           p.stopCloid, p.fees ?? "0");
+           p.stopCloid, p.fees ?? "0", p.targetPx ?? null);
     return Number(info.lastInsertRowid);
   }
 
@@ -353,6 +356,49 @@ export class ExecutionStore {
     return { beforePnl: before.p, beforeFees: before.f, sincePnl: since.p, sinceFees: since.f };
   }
 
+  /** The decision behind a position, so she can be reminded what she argued. */
+  decisionById(id: string): { losing_side: string; forced_orders_are: string; hypothesis: string; reasoning: string } | null {
+    const r = this.db
+      .prepare(`SELECT decision_json FROM decision WHERE id = ?`)
+      .get(id) as { decision_json: string } | undefined;
+    if (!r) return null;
+    try {
+      const d = JSON.parse(r.decision_json);
+      return {
+        losing_side: String(d.losing_side ?? ""),
+        forced_orders_are: String(d.forced_orders_are ?? ""),
+        hypothesis: String(d.hypothesis ?? ""),
+        reasoning: String(d.reasoning ?? ""),
+      };
+    } catch { return null; }
+  }
+
+  /** The decision as stored, for fields the typed accessor does not expose. */
+  rawDecision(id: string): Record<string, unknown> | null {
+    const r = this.db.prepare(`SELECT decision_json FROM decision WHERE id = ?`).get(id) as
+      { decision_json: string } | undefined;
+    if (!r) return null;
+    try { return JSON.parse(r.decision_json) as Record<string, unknown>; } catch { return null; }
+  }
+
+  /** Her own closed trades, newest first — the material she learns from. */
+  recentClosures(limit = 20): { netUsd: number; heldMs: number; hypothesis: string | null }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT p.pnl, p.fees, p.opened_at, p.closed_at,
+                json_extract(d.decision_json, '$.hypothesis') AS hypothesis
+           FROM position p LEFT JOIN decision d ON d.id = p.decision_id
+          WHERE p.closed_at IS NOT NULL
+          ORDER BY p.closed_at DESC LIMIT ?`,
+      )
+      .all(limit) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      netUsd: Number(r.pnl) - Number(r.fees),
+      heldMs: Number(r.closed_at) - Number(r.opened_at),
+      hypothesis: (r.hypothesis as string | null) ?? null,
+    }));
+  }
+
   positionByAsset(asset: string): StoredPosition | undefined {
     const r = this.db
       .prepare(`SELECT * FROM position WHERE asset = ? AND closed_at IS NULL`)
@@ -399,6 +445,7 @@ function rowToPosition(r: Record<string, unknown>): StoredPosition {
     openedAt: r.opened_at as number,
     stopCloid: (r.stop_cloid as string) ?? null,
     stopPx: (r.stop_px as string) ?? null,
+    targetPx: (r.target_px as string) ?? null,
     closedAt: (r.closed_at as number) ?? null,
     exitPx: (r.exit_px as string) ?? null,
     pnl: (r.pnl as string) ?? null,
