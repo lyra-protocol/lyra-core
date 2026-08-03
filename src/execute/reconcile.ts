@@ -156,9 +156,12 @@ export async function repair(
       continue;
     }
     try {
+      // placeStopFor persists the stop itself — id *and* trigger price. Writing
+      // it again here is what silently nulled stop_px on every repaired
+      // position: attachStop's third argument defaulted, so the second call
+      // erased what the first had just recorded.
       const cloid = await placeStopFor(finding.positionId, finding.asset);
       if (cloid) {
-        store.attachStop(finding.positionId, cloid);
         repaired++;
       } else {
         failed.push(`${finding.asset}: stop could not be priced`);

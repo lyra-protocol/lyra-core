@@ -392,3 +392,23 @@ describe("a restart does not invent or lose positions", () => {
     void s;
   });
 });
+
+describe("a repaired stop keeps its trigger price", () => {
+  it("does not lose stop_px when reconciliation re-attaches it", async () => {
+    // repair() used to call attachStop(id, cloid) with the trigger omitted, so
+    // the optional third argument defaulted to null and erased the price that
+    // placeProtectiveStop had just written. Live effect: four protected
+    // positions all displaying STOP NONE.
+    const s = store();
+    const { v, play } = tapeVenue();
+    await restOrder(v, s, { decisionId: "d1", price: "63400.0", size: "0.01" });
+    play([{ px: "63399.0", sz: "1", time: NOW + 1000 }]);
+    await agentOn(v, s).settle();
+
+    const p = s.openPositions()[0]!;
+    expect(p.stopCloid).not.toBeNull();
+    // The number a position exists to answer: where does this end.
+    expect(p.stopPx).not.toBeNull();
+    expect(Number(p.stopPx)).toBeGreaterThan(0);
+  });
+});

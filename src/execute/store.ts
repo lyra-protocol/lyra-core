@@ -290,7 +290,7 @@ export class ExecutionStore {
    * at risk. Reconstructing it later would mean re-deriving a number the venue
    * already accepted, which is a different number the moment sizing changes.
    */
-  attachStop(positionId: number, stopCloid: string, stopPx: string | null = null): void {
+  attachStop(positionId: number, stopCloid: string, stopPx: string | null): void {
     this.db
       .prepare(`UPDATE position SET stop_cloid = ?, stop_px = ? WHERE id = ?`)
       .run(stopCloid, stopPx, positionId);
