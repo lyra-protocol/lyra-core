@@ -112,6 +112,61 @@ export function createColdServer(config: ServeConfig) {
     },
 
     /**
+     * Her account, as anyone may see it.
+     *
+     * Read-only in the strongest sense available: this process opens the
+     * database read-only and holds no key, so there is no code path from a
+     * request to an order.
+     */
+    "/api/wallet": async () => {
+      if (!execDb) {
+        return {
+          trading: false, equityUsd: 0, notionalUsd: 0, unrealizedPnlUsd: 0,
+          sessionPnlUsd: 0, openPositions: 0, dailyLossUsed: 0, positions: [],
+        };
+      }
+      const open = execDb
+        .prepare(`SELECT asset, side, size, entry_px, stop_cloid FROM position WHERE closed_at IS NULL`)
+        .all() as Record<string, unknown>[];
+      const px = await mids();
+      let notional = 0;
+      let unrealised = 0;
+      const positions = open.map((p) => {
+        const size = Number(p.size);
+        const entry = Number(p.entry_px);
+        const mark = Number(px[p.asset as string] ?? p.entry_px);
+        const signed = (p.side as string) === "long" ? 1 : -1;
+        const pnl = (mark - entry) * size * signed;
+        notional += Math.abs(size * mark);
+        unrealised += pnl;
+        return {
+          asset: p.asset as string,
+          side: p.side as "long" | "short",
+          size: p.size as string,
+          entryPx: p.entry_px as string,
+          stopPx: null,
+          unrealizedPnlUsd: pnl,
+        };
+      });
+
+      const since = new Date().setUTCHours(0, 0, 0, 0);
+      const realised = execDb
+        .prepare(`SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0) AS n FROM position WHERE closed_at >= ?`)
+        .get(since) as { n: number };
+
+      return {
+        trading: open.length > 0 || realised.n !== 0,
+        equityUsd: 0,
+        notionalUsd: notional,
+        unrealizedPnlUsd: unrealised,
+        sessionPnlUsd: realised.n,
+        openPositions: open.length,
+        dailyLossUsed: 0,
+        positions,
+      };
+    },
+
+    /**
      * What she has decided.
      *
      * Empty until the agent loop runs. The UI is required to say so rather than
