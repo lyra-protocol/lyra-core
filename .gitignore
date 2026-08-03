@@ -13,3 +13,8 @@ dist
 *.db
 *.db-wal
 *.db-shm
+
+# Runtime logs. The harvester appends on every cycle, so a tracked copy
+# is permanent churn and tells you nothing the server does not already have.
+harvest.log
+*.log
