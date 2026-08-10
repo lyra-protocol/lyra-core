@@ -315,7 +315,24 @@ export class ExecutionStore {
         'reported',
         COALESCE(CAST(json_extract(audit_json, '$.latencyMs') AS INTEGER), 0)
       FROM decision
-      WHERE json_valid(audit_json);
+      WHERE json_valid(audit_json)
+        AND NOT EXISTS (
+          SELECT 1 FROM inference_call current
+          WHERE current.decision_id = decision.id
+            AND current.attempt_id NOT LIKE 'legacy:%'
+        );
+
+      -- Early versions backfilled every audited decision even when the call
+      -- had already been recorded by beginInferenceCall. That made one provider
+      -- call appear twice after restart and could exhaust the daily budget.
+      -- Remove only the synthetic copy; genuine legacy-only history remains.
+      DELETE FROM inference_call AS legacy
+      WHERE legacy.attempt_id LIKE 'legacy:%'
+        AND EXISTS (
+          SELECT 1 FROM inference_call current
+          WHERE current.decision_id = legacy.decision_id
+            AND current.attempt_id NOT LIKE 'legacy:%'
+        );
     `);
 
     // CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,

@@ -92,7 +92,10 @@ export const DEFAULT_LIMITS: Limits = {
   maxPerAssetFraction: 0.25,
   maxDailyFeeFraction: 0.005,
   maxDailyInferenceUsd: 2.0,
-  maxDailyInferenceTokens: 750_000,
+  // A normal eight-asset day measures around 825k reported tokens. The dollar
+  // cap remains the primary spend breaker; this ceiling catches runaway volume
+  // without stopping a healthy day before UTC midnight.
+  maxDailyInferenceTokens: 1_000_000,
   maxBookAgeMs: 4_000,
   minExpectedMove: 0.005,
   minRewardRisk: 1.5,

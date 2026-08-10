@@ -14,7 +14,8 @@
 # Idempotent. Re-running updates the code and restarts the service.
 set -euo pipefail
 
-REPO="https://github.com/lyra-protocol/lyra-core.git"
+CORE_REPO="https://github.com/lyra-protocol/lyra-core.git"
+RECORD_REPO="https://github.com/lyra-protocol/lyra-record.git"
 ROOT=/opt/lyra
 NODE_VERSION=v24.10.0
 NODE_ARCH=linux-arm64
@@ -41,14 +42,22 @@ id -u lyra >/dev/null 2>&1 || sudo useradd --system --home "$ROOT" --shell /usr/
 
 say "fetching code"
 if [ -d "$ROOT/lyra-core/.git" ]; then
-  sudo git -C "$ROOT/lyra-core" fetch --quiet origin main
-  sudo git -C "$ROOT/lyra-core" reset --quiet --hard origin/main
+  sudo git -c safe.directory="$ROOT/lyra-core" -C "$ROOT/lyra-core" fetch --quiet origin main
+  sudo git -c safe.directory="$ROOT/lyra-core" -C "$ROOT/lyra-core" reset --quiet --hard origin/main
 else
-  sudo git clone --quiet "$REPO" "$ROOT/lyra-core"
+  sudo git clone --quiet "$CORE_REPO" "$ROOT/lyra-core"
+fi
+if [ -d "$ROOT/lyra-record/.git" ]; then
+  sudo git -c safe.directory="$ROOT/lyra-record" -C "$ROOT/lyra-record" fetch --quiet origin main
+  sudo git -c safe.directory="$ROOT/lyra-record" -C "$ROOT/lyra-record" reset --quiet --hard origin/main
+else
+  sudo git clone --quiet "$RECORD_REPO" "$ROOT/lyra-record"
 fi
 
 say "building with the private node"
 export PATH="$ROOT/node/bin:$PATH"
+sudo env PATH="$PATH" "$ROOT/node/bin/npm" --prefix "$ROOT/lyra-record" install --silent --ignore-scripts
+sudo env PATH="$PATH" "$ROOT/node/bin/npm" --prefix "$ROOT/lyra-record" run build --silent
 sudo env PATH="$PATH" "$ROOT/node/bin/npm" --prefix "$ROOT/lyra-core" ci --silent
 sudo env PATH="$PATH" "$ROOT/node/bin/npm" --prefix "$ROOT/lyra-core" run build --silent
 

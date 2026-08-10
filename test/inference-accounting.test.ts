@@ -137,4 +137,47 @@ describe("inference accounting", () => {
     expect(second.inferenceUsageBetween(0, 2000).attempts).toBe(1);
     second.close();
   });
+
+  it("does not double-count a decision whose modern inference call is already recorded", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lyra-inference-modern-"));
+    dirs.push(dir);
+    const path = join(dir, "exec.db");
+    const s = new ExecutionStore(path);
+    const c = client();
+    const prepared = c.prepare(input);
+
+    s.beginInferenceCall({ prepared, decisionId: "d1", asset: "BTC", ...c.metadata() });
+    s.saveDecision({
+      id: "d1",
+      at: prepared.startedAt,
+      asset: "BTC",
+      action: "hold",
+      conviction: 0,
+      expectedMove: 0,
+      auditJson: JSON.stringify({
+        model: "test-model", provider: "azure:test", apiVersion: "v1",
+        promptTokens: 20, completionTokens: 10, costUsd: 0.000125, latencyMs: 50,
+      }),
+      decisionJson: "{}",
+    });
+    s.close();
+
+    // Simulate the duplicate row produced by the old migration, then prove a
+    // restart removes the synthetic copy without touching the real attempt.
+    const db = new DatabaseSync(path);
+    db.prepare(`INSERT INTO inference_call
+      (attempt_id,decision_id,asset,started_at,completed_at,model,provider,api_version,
+       transport_ok,validation_ok,accounted_prompt_tokens,accounted_completion_tokens,
+       accounted_cost_usd,usage_source)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        "legacy:d1", "d1", "BTC", prepared.startedAt, prepared.startedAt + 50,
+        "test-model", "azure:test", "v1", 1, 1, 20, 10, 0.000125, "reported",
+      );
+    db.close();
+
+    const restarted = new ExecutionStore(path);
+    expect(restarted.inferenceUsageBetween(prepared.startedAt - 1, prepared.startedAt + 100))
+      .toMatchObject({ attempts: 1, pending: 1 });
+    restarted.close();
+  });
 });
