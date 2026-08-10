@@ -16,6 +16,7 @@ set -euo pipefail
 
 CORE_REPO="https://github.com/lyra-protocol/lyra-core.git"
 RECORD_REPO="https://github.com/lyra-protocol/lyra-record.git"
+RECORD_BRANCH="irys-rewrite"
 ROOT=/opt/lyra
 NODE_VERSION=v24.10.0
 NODE_ARCH=linux-arm64
@@ -48,10 +49,10 @@ else
   sudo git clone --quiet "$CORE_REPO" "$ROOT/lyra-core"
 fi
 if [ -d "$ROOT/lyra-record/.git" ]; then
-  sudo git -c safe.directory="$ROOT/lyra-record" -C "$ROOT/lyra-record" fetch --quiet origin main
-  sudo git -c safe.directory="$ROOT/lyra-record" -C "$ROOT/lyra-record" reset --quiet --hard origin/main
+  sudo git -c safe.directory="$ROOT/lyra-record" -C "$ROOT/lyra-record" fetch --quiet origin "$RECORD_BRANCH"
+  sudo git -c safe.directory="$ROOT/lyra-record" -C "$ROOT/lyra-record" reset --quiet --hard "origin/$RECORD_BRANCH"
 else
-  sudo git clone --quiet "$RECORD_REPO" "$ROOT/lyra-record"
+  sudo git clone --quiet --branch "$RECORD_BRANCH" "$RECORD_REPO" "$ROOT/lyra-record"
 fi
 
 say "building with the private node"
