@@ -53,6 +53,9 @@ export type Limits = {
   /** Daily inference spend, in USD. Breach is a risk event like any other. */
   maxDailyInferenceUsd: number;
 
+  /** Daily budget-accounted input and output token ceiling. */
+  maxDailyInferenceTokens: number;
+
   /**
    * Oldest acceptable book before new positions are blocked.
    *
@@ -71,8 +74,14 @@ export type Limits = {
    */
   minExpectedMove: number;
 
+  /** Minimum target reward divided by deterministic stop risk. */
+  minRewardRisk: number;
+
   /** Refuse to act on a decision older than this. */
   maxDecisionAgeMs: number;
+
+  /** Minimum pause before repeating the same asset and direction after a stop. */
+  sameDirectionStopCooldownMs: number;
 };
 
 export const DEFAULT_LIMITS: Limits = {
@@ -83,9 +92,12 @@ export const DEFAULT_LIMITS: Limits = {
   maxPerAssetFraction: 0.25,
   maxDailyFeeFraction: 0.005,
   maxDailyInferenceUsd: 2.0,
+  maxDailyInferenceTokens: 750_000,
   maxBookAgeMs: 4_000,
   minExpectedMove: 0.005,
+  minRewardRisk: 1.5,
   maxDecisionAgeMs: 10_000,
+  sameDirectionStopCooldownMs: 6 * 60 * 60 * 1_000,
 };
 
 /**
@@ -112,6 +124,9 @@ export function validateLimits(l: Limits): void {
   fraction("maxPerAssetFraction", 1);
   fraction("maxDailyFeeFraction", 0.1);
   fraction("minExpectedMove", 1);
+  if (!Number.isFinite(l.minRewardRisk) || l.minRewardRisk <= 0 || l.minRewardRisk > 20) {
+    problems.push(`minRewardRisk must be in (0, 20], got ${l.minRewardRisk}`);
+  }
 
   if (!Number.isInteger(l.maxOpenPositions) || l.maxOpenPositions < 1) {
     problems.push(`maxOpenPositions must be a positive integer, got ${l.maxOpenPositions}`);
@@ -127,6 +142,12 @@ export function validateLimits(l: Limits): void {
   }
   if (l.maxDailyInferenceUsd <= 0) {
     problems.push("maxDailyInferenceUsd must be positive");
+  }
+  if (!Number.isInteger(l.maxDailyInferenceTokens) || l.maxDailyInferenceTokens <= 0) {
+    problems.push("maxDailyInferenceTokens must be a positive integer");
+  }
+  if (!Number.isInteger(l.sameDirectionStopCooldownMs) || l.sameDirectionStopCooldownMs < 60_000 || l.sameDirectionStopCooldownMs > 7 * 86_400_000) {
+    problems.push(`sameDirectionStopCooldownMs must be between 1 minute and 7 days, got ${l.sameDirectionStopCooldownMs}`);
   }
 
   if (problems.length > 0) {

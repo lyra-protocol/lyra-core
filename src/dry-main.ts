@@ -29,6 +29,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { buildPainMap } from "./painmap.js";
 import { assessMateriality, DEFAULT_MATERIALITY, type LastSeen } from "./decide/materiality.js";
+import { closureCountBetween } from "./decide/closure-delta.js";
 import { DecisionClient } from "./decide/client.js";
 import {
   buildUserPrompt,
@@ -38,6 +39,8 @@ import {
 } from "./decide/prompt.js";
 import { makerPrice, sizePosition } from "./decide/sizing.js";
 import { DEFAULT_LIMITS } from "./risk/limits.js";
+import { Guard } from "./risk/guard.js";
+import { emptyState } from "./risk/state.js";
 import { ExecutionStore } from "./execute/store.js";
 import { DEFAULT_CONFIG } from "./harvest.js";
 import { randomUUID } from "node:crypto";
@@ -55,6 +58,7 @@ const client = new DecisionClient({
   apiVersion: required("AZURE_OPENAI_API_VERSION"),
   deployment: required("AZURE_OPENAI_MODEL"),
 });
+const guard = new Guard(DEFAULT_LIMITS);
 
 const lastSeen = new Map<string, LastSeen>();
 const tally = {
@@ -124,14 +128,27 @@ async function cycle(): Promise<void> {
   tally.cycles++;
   const px = await mids();
   const oi = await openInterest();
+  const midnight = new Date().setUTCHours(0, 0, 0, 0);
+  const used = store.inferenceUsageBetween(midnight, midnight + 86_400_000);
+  const risk = emptyState(PAPER_EQUITY, UNIVERSE);
+  risk.inferenceSpentTodayUsd = used.accountedCostUsd;
+  risk.inferenceTokensToday = used.accountedTotalTokens;
+  risk.inferenceAttemptsToday = used.attempts;
 
   for (const asset of UNIVERSE) {
     const mid = px[asset];
     if (!mid) continue;
 
     const map = buildPainMap(venueDb, asset, mid, { venueOpenInterestUsd: oi[asset] ?? null });
+    const now = Date.now();
+    const last = lastSeen.get(asset) ?? null;
     const gate = assessMateriality(
-      { map, last: lastSeen.get(asset) ?? null, now: Date.now(), closuresSinceLast: 0 },
+      {
+        map,
+        last,
+        now,
+        closuresSinceLast: last ? closureCountBetween(venueDb, asset, last.at, now) : 0,
+      },
       DEFAULT_MATERIALITY,
     );
 
@@ -145,15 +162,31 @@ async function cycle(): Promise<void> {
       at: Date.now(),
       aggregateUnrealizedPnlUsd: map.aggregateUnrealizedPnlUsd,
       losingSide: map.losingSide,
+      openPosition: null,
     });
 
     const observations = painMapObservations(map);
-    const consult = await client.consult({
+    const decisionId = randomUUID();
+    const prepared = client.prepare({
       systemPrompt: SYSTEM_PROMPT,
       userPrompt: buildUserPrompt(observations, DEFAULT_QUESTION),
       eventIds: observations.map((o) => o.id),
     });
+    const budget = guard.approveInference(prepared.reservation, risk);
+    if (!budget.ok) {
+      tally.refusals++;
+      bump(tally.byReason, `budget:${budget.code}`);
+      log(`${asset}  REFUSED  ${budget.code}: ${budget.detail}`);
+      continue;
+    }
+    store.beginInferenceCall({ prepared, decisionId, asset, ...client.metadata() });
+    const consult = await client.consult(prepared);
+    store.finishInferenceCall(consult.call);
+    risk.inferenceSpentTodayUsd += consult.call.accountedUsage.costUsd;
+    risk.inferenceTokensToday += consult.call.accountedUsage.totalTokens;
+    risk.inferenceAttemptsToday += 1;
     tally.consultations++;
+    tally.costUsd += consult.call.accountedUsage.costUsd;
 
     if (!consult.ok) {
       tally.refusals++;
@@ -163,9 +196,7 @@ async function cycle(): Promise<void> {
     }
 
     const { decision, audit } = consult;
-    tally.costUsd += audit.costUsd;
 
-    const decisionId = randomUUID();
     store.saveDecision({
       id: decisionId,
       at: audit.at,

@@ -481,37 +481,39 @@ describe("her own record is fed back to her", () => {
 describe("the exit gate", () => {
   const base = {
     observed: "x", losing_side: "longs", forced_orders_are: "sells_below_spot",
-    hypothesis: "magnet", expected_move: 0.02, conviction: 0.6,
+    hypothesis: "magnet", conviction: 0.6,
     // A trade must cite evidence — the grounding rule applies to exits too, so
     // the fixture carries a real citation rather than testing around it.
     reasoning: "y", evidence_event_ids: ["own_thesis"],
   };
   const parse = (d: Record<string, unknown>) =>
-    validateDecision(JSON.stringify(d), ["own_thesis", "pain_map"]);
+    validateDecision(JSON.stringify({ decision: d }), ["own_thesis", "pain_map"]);
 
   it("refuses to close while the thesis is intact", () => {
     // Every loss in the first ten trades was a manual close on roughly −0.4%,
     // against a stop ~11% away. "It is red right now" is no longer an answer.
-    const r = parse({ ...base, action: "close", target_px: 0, thesis_status: "intact" });
+    const r = parse({ ...base, action: "close", thesis_status: "intact" });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.failure.detail).toMatch(/invalidated or played_out/);
   });
 
   it("allows a close when the thesis is gone or finished", () => {
     for (const status of ["invalidated", "played_out"]) {
-      const r = parse({ ...base, action: "close", target_px: 0, thesis_status: status });
+      const r = parse({ ...base, action: "close", thesis_status: status });
       expect(r.ok).toBe(true);
+      if (r.ok) expect(r.decision).toMatchObject({ target_px: 0, expected_move: 0 });
     }
   });
 
   it("refuses to open without naming the price that would prove it right", () => {
-    const r = parse({ ...base, action: "open_short", target_px: 0, thesis_status: "no_position" });
+    const r = parse({ ...base, action: "open_short", target_px: 0, expected_move: 0.02, thesis_status: "no_position" });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.failure.detail).toMatch(/target_px/);
   });
 
   it("still allows a hold to name no target", () => {
-    const r = parse({ ...base, action: "hold", target_px: 0, thesis_status: "no_position" });
+    const r = parse({ ...base, hypothesis: "none", action: "hold", thesis_status: "no_position" });
     expect(r.ok).toBe(true);
+    if (r.ok) expect(r.decision).toMatchObject({ target_px: 0, expected_move: 0 });
   });
 });

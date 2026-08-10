@@ -20,16 +20,20 @@
 import type { DatabaseSync } from "node:sqlite";
 import { buildPainMap, type PainMap } from "./painmap.js";
 import { assessMateriality, DEFAULT_MATERIALITY, type LastSeen } from "./decide/materiality.js";
+import { closureCountBetween } from "./decide/closure-delta.js";
 import { DecisionClient } from "./decide/client.js";
 import {
   buildUserPrompt,
   DEFAULT_QUESTION,
   painMapObservations,
   performanceObservations,
+  learningObservations,
   positionObservations,
   SYSTEM_PROMPT,
 } from "./decide/prompt.js";
 import { makerPrice, sizePosition, stopPrice } from "./decide/sizing.js";
+import { deriveDecisionMetrics, validateDecisionSemantics } from "./decide/semantics.js";
+import type { ShadowEvaluator } from "./decide/shadow.js";
 import { Guard } from "./risk/guard.js";
 import { DEFAULT_LIMITS, type Limits } from "./risk/limits.js";
 import { emptyState, type RiskState } from "./risk/state.js";
@@ -45,6 +49,7 @@ export type AgentConfig = {
   store: ExecutionStore;
   recorder: Recorder;
   client: DecisionClient;
+  shadow?: ShadowEvaluator;
   /** Read-only handle on the harvester database. */
   venueDb: DatabaseSync;
   limits?: Limits;
@@ -59,6 +64,8 @@ export type AgentConfig = {
    * session baseline makes the drawdown identically zero.
    */
   startingEquityUsd: number;
+  /** Immutable identity of the active prompt, schema, model and limits. */
+  strategyId?: string;
   book: (asset: string) => Promise<{ bid: string; ask: string; ts: number }>;
   mids: () => Promise<Record<string, string>>;
   openInterestUsd: (asset: string) => Promise<number | null>;
@@ -154,6 +161,7 @@ export class Agent {
 
     const state = await this.readRiskState();
     const mids = await this.config.mids();
+    this.config.shadow?.observeMids(mids, Date.now());
 
     for (const asset of this.config.universe) {
       try {
@@ -181,18 +189,40 @@ export class Agent {
     });
 
     const existing = this.config.store.positionByAsset(asset);
+    const now = Date.now();
+    const last = this.lastSeen.get(asset) ?? null;
+    const currentUnrealized = existing ? unrealised(existing, map.midPx) : null;
+
+    // Targets are deterministic exits. They must not wait for coverage, a
+    // materiality change, an inference budget, or the consultation interval.
+    if (existing?.targetPx) {
+      const target = Number(existing.targetPx);
+      const mark = Number(map.midPx);
+      const reached = existing.side === "long" ? mark >= target : mark <= target;
+      if (Number.isFinite(target) && target > 0 && reached) {
+        this.log(`${asset}: target ${existing.targetPx} reached at ${map.midPx} — taking it`);
+        return await this.closePosition(asset, `${existing.decisionId}:target`, "target_reached");
+      }
+    }
+
     const gate = assessMateriality(
       {
         map,
-        last: this.lastSeen.get(asset) ?? null,
-        now: Date.now(),
-        closuresSinceLast: 0,
+        last,
+        now,
+        closuresSinceLast: last
+          ? closureCountBetween(this.config.venueDb, asset, last.at, now)
+          : 0,
         ...(existing
           ? {
               openPosition: {
-                notionalUsd: Number(existing.size) * Number(existing.entryPx),
-                unrealizedPnlUsd: 0,
-                lastReviewedPnlUsd: 0,
+                positionId: existing.id,
+                notionalUsd: Math.abs(Number(existing.size) * Number(map.midPx)),
+                unrealizedPnlUsd: currentUnrealized ?? 0,
+                lastReviewedPnlUsd:
+                  last?.openPosition?.positionId === existing.id
+                    ? last.openPosition.unrealizedPnlUsd
+                    : null,
               },
             }
           : {}),
@@ -210,25 +240,10 @@ export class Agent {
       at: Date.now(),
       aggregateUnrealizedPnlUsd: map.aggregateUnrealizedPnlUsd,
       losingSide: map.losingSide,
+      openPosition: existing && currentUnrealized !== null
+        ? { positionId: existing.id, unrealizedPnlUsd: currentUnrealized }
+        : null,
     });
-
-    /*
-     * A target reached is an exit, taken without consulting anyone.
-     *
-     * She named this price as the one that would prove her right. Asking the
-     * model again at that moment reintroduces exactly the discretion the target
-     * exists to remove — and over the first ten trades that discretion took
-     * winners at +0.05% against a thesis calling for 1-4%.
-     */
-    if (existing?.targetPx) {
-      const target = Number(existing.targetPx);
-      const mark = Number(map.midPx);
-      const reached = existing.side === "long" ? mark >= target : mark <= target;
-      if (Number.isFinite(target) && target > 0 && reached) {
-        this.log(`${asset}: target ${existing.targetPx} reached at ${map.midPx} — taking it`);
-        return await this.closePosition(asset, `${existing.decisionId}:target`);
-      }
-    }
 
     return await this.decideAndAct(asset, map, state, existing !== undefined);
   }
@@ -264,12 +279,77 @@ export class Agent {
     }
 
     observations.push(...performanceObservations(this.config.store.recentClosures(20)));
+    observations.push(...learningObservations(this.config.store.performanceStats()));
 
     const decisionId = randomUUID();
-    const consult = await this.config.client.consult({
+    const generationExisting = this.config.store.positionByAsset(asset);
+    const generationOpening = generationExisting
+      ? this.config.store.rawDecision(generationExisting.decisionId)
+      : null;
+    const originalHypothesis = generationOpening?.hypothesis;
+    if (generationExisting && !["magnet", "wall", "cascade"].includes(String(originalHypothesis))) {
+      return { asset, result: "blocked", detail: "open position has no valid opening hypothesis" };
+    }
+    const request = {
       systemPrompt: SYSTEM_PROMPT,
       userPrompt: buildUserPrompt(observations, DEFAULT_QUESTION),
       eventIds: observations.map((o) => o.id),
+      generationContext: generationExisting
+        ? { kind: "positioned" as const, originalHypothesis: originalHypothesis as "magnet" | "wall" | "cascade" }
+        : { kind: "flat" as const },
+    };
+    const prepared = this.config.client.prepare(request);
+    const budget = this.guard.approveInference(prepared.reservation, state);
+    if (!budget.ok) {
+      return { asset, result: "refused", code: budget.code, detail: budget.detail };
+    }
+
+    const metadata = this.config.client.metadata();
+    this.config.store.beginInferenceCall({
+      prepared, decisionId, asset, ...metadata,
+    });
+
+    const consult = await this.config.client.consult(prepared);
+    try {
+      this.config.store.finishInferenceCall(
+        consult.call,
+        consult.audit?.rawOutput ?? null,
+        consult.ok ? JSON.stringify(consult.decision) : null,
+      );
+    } catch (error) {
+      // The reserved call remains durable and charged. Acting without completing
+      // its audit would separate a decision from the compute that produced it.
+      return {
+        asset,
+        result: "blocked",
+        detail: `could not finish inference accounting: ${(error as Error).message}`,
+      };
+    }
+    state.inferenceSpentTodayUsd += consult.call.accountedUsage.costUsd;
+    state.inferenceTokensToday += consult.call.accountedUsage.totalTokens;
+    state.inferenceAttemptsToday += 1;
+
+    const existingForShadow = this.config.store.positionByAsset(asset);
+    const openingForShadow = existingForShadow
+      ? this.config.store.rawDecision(existingForShadow.decisionId)
+      : null;
+    this.config.shadow?.evaluate({
+      championDecisionId: decisionId,
+      championAttemptId: consult.call.attemptId,
+      asset,
+      request,
+      champion: consult,
+      semanticContext: {
+        entryPx: existingForShadow ? Number(existingForShadow.entryPx) : Number(map.midPx),
+        existingPosition: existingForShadow ? {
+          side: existingForShadow.side,
+          hypothesis: typeof openingForShadow?.hypothesis === "string"
+            ? openingForShadow.hypothesis as "magnet" | "wall" | "cascade" | "none"
+            : null,
+        } : undefined,
+        minExpectedMove: this.limits.minExpectedMove,
+        minRewardRisk: this.limits.minRewardRisk,
+      },
     });
 
     if (!consult.ok) {
@@ -283,7 +363,8 @@ export class Agent {
       };
     }
 
-    const { decision, audit } = consult;
+    const { audit } = consult;
+    const decision = deriveDecisionMetrics(consult.decision, Number(map.midPx));
     this.config.store.saveDecision({
       id: decisionId,
       at: audit.at,
@@ -295,13 +376,47 @@ export class Agent {
       decisionJson: JSON.stringify(decision),
     });
 
+    const existing = this.config.store.positionByAsset(asset);
+    if (decision.action === "hold" || decision.action === "close") {
+      const original = existing ? this.config.store.rawDecision(existing.decisionId) : null;
+      const semantics = validateDecisionSemantics(decision, {
+        entryPx: existing ? Number(existing.entryPx) : Number(map.midPx),
+        existingPosition: existing
+          ? {
+              side: existing.side,
+              hypothesis: typeof original?.hypothesis === "string"
+                ? original.hypothesis as typeof decision.hypothesis
+                : null,
+            }
+          : undefined,
+        minExpectedMove: this.limits.minExpectedMove,
+        minRewardRisk: this.limits.minRewardRisk,
+      });
+      if (!semantics.ok) {
+        this.config.store.setDecisionOutcome(decisionId, `refused:semantic:${semantics.failure.code}`);
+        return {
+          asset, result: "refused", code: semantics.failure.code, detail: semantics.failure.detail,
+        };
+      }
+    }
+
     if (decision.action === "hold") {
       this.config.store.setDecisionOutcome(decisionId, "hold");
       return { asset, result: "held", reasoning: decision.reasoning };
     }
     if (decision.action === "close") {
       this.config.store.setDecisionOutcome(decisionId, "close_requested");
-      return await this.closePosition(asset, decisionId);
+      return await this.closePosition(
+        asset,
+        decisionId,
+        decision.thesis_status === "played_out" ? "thesis_played_out" : "thesis_invalidated",
+      );
+    }
+
+    const plan = await this.prepareOpeningPlan(asset, decision, state);
+    if (!plan.ok) {
+      this.config.store.setDecisionOutcome(decisionId, `refused:semantic:${plan.code}`);
+      return { asset, result: "refused", code: plan.code, detail: plan.detail };
     }
 
     // The blocking rule (§8.7). Reasoning goes to Arweave before any order, and
@@ -318,7 +433,43 @@ export class Agent {
       throw error;
     }
 
-    return await this.openPosition(asset, decisionId, reasoningId, decision, state);
+    return await this.openPosition(asset, decisionId, reasoningId, decision, state, plan);
+  }
+
+  private async prepareOpeningPlan(
+    asset: string,
+    decision: { action: string; conviction: number; expected_move: number; target_px?: number; hypothesis?: string; thesis_status?: string },
+    state: RiskState,
+  ): Promise<
+    | { ok: true; side: "long" | "short"; book: { bid: string; ask: string; ts: number }; price: string; notionalUsd: number; size: string; stopPx: string }
+    | { ok: false; code: string; detail: string }
+  > {
+    const side = decision.action === "open_long" ? "long" : "short";
+    const book = await this.config.book(asset);
+    const price = makerPrice({ side, bid: book.bid, ask: book.ask, tickSize: "0.1" });
+    if (!price) return { ok: false, code: "book_crossed", detail: "book is crossed or inverted" };
+    const notionalUsd = sizePosition({
+      equityUsd: state.equityUsd,
+      conviction: decision.conviction,
+      volatility: await this.config.volatility(asset),
+      limits: this.limits,
+    });
+    if (notionalUsd <= 0) return { ok: false, code: "size_zero", detail: "sizing produced no position" };
+    const stop = stopPrice({
+      side, entryPx: price, notionalUsd, equityUsd: state.equityUsd,
+      riskFraction: this.config.riskPerTrade ?? 0.02,
+      targetPx: typeof decision.target_px === "number" ? String(decision.target_px) : null,
+      minRewardRisk: this.limits.minRewardRisk,
+    });
+    if (!stop) return { ok: false, code: "stop_invalid", detail: "could not derive a protective stop" };
+    const semantics = validateDecisionSemantics(decision as Parameters<typeof validateDecisionSemantics>[0], {
+      entryPx: Number(price),
+      stopPx: Number(stop),
+      minExpectedMove: this.limits.minExpectedMove,
+      minRewardRisk: this.limits.minRewardRisk,
+    });
+    if (!semantics.ok) return { ok: false, code: semantics.failure.code, detail: semantics.failure.detail };
+    return { ok: true, side, book, price, notionalUsd, size: String(notionalUsd / Number(price)), stopPx: stop };
   }
 
   private async openPosition(
@@ -327,26 +478,9 @@ export class Agent {
     reasoningId: string,
     decision: { action: string; conviction: number; expected_move: number },
     state: RiskState,
+    plan: { ok: true; side: "long" | "short"; book: { bid: string; ask: string; ts: number }; price: string; notionalUsd: number; size: string; stopPx: string },
   ): Promise<CycleOutcome> {
-    const side = decision.action === "open_long" ? "long" : "short";
-    const b = await this.config.book(asset);
-
-    const price = makerPrice({ side, bid: b.bid, ask: b.ask, tickSize: "0.1" });
-    if (!price) {
-      return { asset, result: "refused", code: "book_crossed", detail: "book is crossed or inverted" };
-    }
-
-    const notionalUsd = sizePosition({
-      equityUsd: state.equityUsd,
-      conviction: decision.conviction,
-      volatility: await this.config.volatility(asset),
-      limits: this.limits,
-    });
-    if (notionalUsd <= 0) {
-      return { asset, result: "refused", code: "size_zero", detail: "sizing produced no position" };
-    }
-
-    const size = String(notionalUsd / Number(price));
+    const { side, book: b, price, notionalUsd, size } = plan;
     const cloid = deriveCloid(decisionId, 0);
 
     const approval = this.guard.approveOpen(
@@ -451,6 +585,9 @@ export class Agent {
       const pnl = realisedPnl(stopped, px);
       const fees = String(Number(stopped.fees ?? "0") + Number(fill.fee));
       this.config.store.closePosition(stopped.id, { closedAt: fill.at, exitPx: px, pnl, fees });
+      this.config.store.setCloseAttribution(stopped.id, {
+        reason: "stop_triggered", decisionId: null, cloid: fill.cloid,
+      });
       await this.cancelRestingFor(asset, stopped, fill.cloid);
       this.log(`${asset}: STOPPED OUT at ${px}, pnl ${pnl}`);
       return { asset, result: "closed", positionId: stopped.id, px, pnl, why: "stop" };
@@ -478,6 +615,11 @@ export class Agent {
       const pnl = realisedPnl(open, px);
       const fees = String(Number(open.fees ?? "0") + Number(fill.fee));
       this.config.store.closePosition(open.id, { closedAt: fill.at, exitPx: px, pnl, fees });
+      this.config.store.setCloseAttribution(open.id, {
+        reason: closeReasonFor(this.config.store, intent.decisionId),
+        decisionId: intent.decisionId,
+        cloid: fill.cloid,
+      });
       await this.cancelRestingFor(asset, open, fill.cloid);
       this.log(`${asset}: closed at ${px}, pnl ${pnl}`);
       return { asset, result: "closed", positionId: open.id, px, pnl, why: "exit" };
@@ -504,6 +646,7 @@ export class Agent {
       return { asset, result: "orphan", cloid: fill.cloid, detail: "fill opposes an open position" };
     }
 
+    const opening = this.config.store.rawDecision(intent.decisionId);
     const positionId = this.config.store.openPosition({
       asset,
       decisionId: intent.decisionId,
@@ -517,6 +660,11 @@ export class Agent {
       // The price she said would prove her right. Without it the position has
       // no exit but the model's nerve, which is what cut winners at +0.05%.
       targetPx: targetPxFor(this.config.store, intent.decisionId),
+      openAction: typeof opening?.action === "string" ? opening.action : null,
+      hypothesis: typeof opening?.hypothesis === "string" ? opening.hypothesis : null,
+      conviction: typeof opening?.conviction === "number" ? opening.conviction : null,
+      expectedMove: typeof opening?.expected_move === "number" ? opening.expected_move : null,
+      strategyId: this.config.strategyId ?? null,
     });
     // The most dangerous window in the system is between here and the stop.
     await this.placeProtectiveStop(positionId, asset);
@@ -598,6 +746,8 @@ export class Agent {
       notionalUsd,
       equityUsd,
       riskFraction: this.config.riskPerTrade ?? 0.02,
+      targetPx: position.targetPx,
+      minRewardRisk: this.limits.minRewardRisk,
     });
     if (!trigger) return null;
 
@@ -621,7 +771,11 @@ export class Agent {
     return cloid;
   }
 
-  private async closePosition(asset: string, decisionId: string): Promise<CycleOutcome> {
+  private async closePosition(
+    asset: string,
+    decisionId: string,
+    reason: "target_reached" | "thesis_invalidated" | "thesis_played_out" = "thesis_invalidated",
+  ): Promise<CycleOutcome> {
     const position = this.config.store.positionByAsset(asset);
     if (!position) {
       return { asset, result: "refused", code: "no_position_to_reduce", detail: "nothing open" };
@@ -672,6 +826,7 @@ export class Agent {
       cloid, decisionId, asset, side, price, size: position.size,
       reduceOnly: true, tif: approval.order.tif, attempt: 0, createdAt: Date.now(),
     });
+    this.config.store.setCloseAttribution(position.id, { reason, decisionId, cloid });
     const placed = await this.config.venue.place(approval.order);
     this.config.store.updateIntent(cloid, {
       status: placed.status === "filled" ? "filled" : "placed",
@@ -729,6 +884,14 @@ export class Agent {
     const r = this.config.store.realisedAround(midnight);
     state.sessionStartEquityUsd = this.config.startingEquityUsd + r.beforePnl - r.beforeFees;
     state.feesPaidTodayUsd = r.sinceFees;
+    const inference = this.config.store.inferenceUsageBetween(midnight, midnight + 86_400_000);
+    state.inferenceSpentTodayUsd = inference.accountedCostUsd;
+    state.inferenceTokensToday = inference.accountedTotalTokens;
+    state.inferenceAttemptsToday = inference.attempts;
+    const stopWindowStart = Date.now() - this.limits.sameDirectionStopCooldownMs;
+    for (const stop of this.config.store.recentStopsSince(stopWindowStart)) {
+      state.lastStopByAssetSide.set(`${stop.asset}:${stop.side}`, stop.at);
+    }
     for (const p of this.config.store.openPositions()) {
       const notional = Number(p.size) * Number(p.entryPx);
       state.positions.set(p.asset, {
@@ -760,6 +923,17 @@ function targetPxFor(store: ExecutionStore, decisionId: string): string | null {
   const d = store.rawDecision(decisionId);
   const t = d?.target_px;
   return typeof t === "number" && t > 0 ? String(t) : null;
+}
+
+function closeReasonFor(
+  store: ExecutionStore,
+  decisionId: string,
+): "target_reached" | "thesis_invalidated" | "thesis_played_out" | "legacy_unknown" {
+  if (decisionId.endsWith(":target")) return "target_reached";
+  const d = store.rawDecision(decisionId);
+  if (d?.thesis_status === "played_out") return "thesis_played_out";
+  if (d?.thesis_status === "invalidated") return "thesis_invalidated";
+  return "legacy_unknown";
 }
 
 /**

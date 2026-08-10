@@ -113,15 +113,26 @@ export function stopPrice(inputs: {
   riskFraction: number;
   /** Never place a stop tighter than this, or noise will trigger it. */
   minDistanceFraction?: number;
+  /** Optional falsifiable target; when present the stop must also satisfy reward/risk. */
+  targetPx?: string | null;
+  minRewardRisk?: number;
 }): string | null {
   const entry = Number(inputs.entryPx);
   if (!Number.isFinite(entry) || entry <= 0) return null;
   if (inputs.notionalUsd <= 0 || inputs.equityUsd <= 0) return null;
 
   const riskUsd = inputs.equityUsd * inputs.riskFraction;
+  const riskBudgetDistance = riskUsd / inputs.notionalUsd;
+  const minimumDistance = inputs.minDistanceFraction ?? 0.003;
+  const target = inputs.targetPx ? Number(inputs.targetPx) : NaN;
+  const rewardDistance = Number.isFinite(target) ? Math.abs(target - entry) / entry : null;
+  const rewardRiskDistance =
+    rewardDistance !== null && inputs.minRewardRisk && inputs.minRewardRisk > 0
+      ? rewardDistance / inputs.minRewardRisk
+      : riskBudgetDistance;
   const distanceFraction = Math.max(
-    riskUsd / inputs.notionalUsd,
-    inputs.minDistanceFraction ?? 0.003,
+    minimumDistance,
+    Math.min(riskBudgetDistance, rewardRiskDistance),
   );
 
   const stop =

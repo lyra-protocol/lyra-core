@@ -50,6 +50,12 @@ export type RiskState = {
   /** Inference spend this session. Breach is a risk event like any other. */
   inferenceSpentTodayUsd: number;
 
+  /** Budget-accounted input and output tokens since UTC midnight. */
+  inferenceTokensToday: number;
+
+  /** Calls started since UTC midnight, including calls interrupted in flight. */
+  inferenceAttemptsToday: number;
+
   /**
    * Set by ingestion when the feed gaps or timestamps drift.
    *
@@ -60,6 +66,9 @@ export type RiskState = {
 
   /** One flag, checked before everything. Halts all new risk. */
   killSwitch: boolean;
+
+  /** Last deterministic stop by asset and side, used to prevent immediate revenge re-entry. */
+  lastStopByAssetSide: Map<string, number>;
 };
 
 /** A state with nothing open — the shape at session start, and the test baseline. */
@@ -75,8 +84,11 @@ export function emptyState(
     universe,
     feesPaidTodayUsd: 0,
     inferenceSpentTodayUsd: 0,
+    inferenceTokensToday: 0,
+    inferenceAttemptsToday: 0,
     feedDegraded: false,
     killSwitch: false,
+    lastStopByAssetSide: new Map(),
   };
 }
 

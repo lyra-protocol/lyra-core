@@ -26,6 +26,7 @@ import { Recorder } from "./record/recorder.js";
 import { DEFAULT_LIMITS } from "./risk/limits.js";
 import { DEFAULT_CONFIG } from "./harvest.js";
 import { realisedVolatility } from "./volatility.js";
+import { ShadowEvaluator } from "./decide/shadow.js";
 
 const UNIVERSE = DEFAULT_CONFIG.universe;
 const EQUITY = Number(process.env.LYRA_PAPER_EQUITY ?? 10_000);
@@ -63,6 +64,27 @@ const tradesOf = async (asset: string) => {
 };
 
 const venue = new PaperVenue(EQUITY, bookOf, tradesOf);
+const activeStrategyId = strategyId({
+  promptTemplate: PROMPT_TEMPLATE_ID,
+  schemaHash: schemaHash(),
+  model: need("AZURE_OPENAI_MODEL"),
+  limits: DEFAULT_LIMITS,
+});
+const challengerModel = process.env.AZURE_OPENAI_CHALLENGER_MODEL;
+const challengerEnabled = process.env.AZURE_OPENAI_CHALLENGER_ENABLED !== "false";
+const shadow = challengerModel && challengerEnabled
+  ? new ShadowEvaluator({
+      client: new DecisionClient({
+        endpoint: need("AZURE_OPENAI_ENDPOINT"), apiKey: need("AZURE_OPENAI_API_KEY"),
+        apiVersion: need("AZURE_OPENAI_API_VERSION"), deployment: challengerModel,
+        reasoningEffort: "low",
+      }),
+      store,
+      maxDailyUsd: Number(process.env.LYRA_CHALLENGER_DAILY_USD ?? 1),
+      maxDailyTokens: Number(process.env.LYRA_CHALLENGER_DAILY_TOKENS ?? 500_000),
+      log,
+    })
+  : undefined;
 
 const agent = new Agent({
   universe: UNIVERSE,
@@ -73,12 +95,7 @@ const agent = new Agent({
     // Off chain: the key is never used to sign anything in this mode.
     key: { publicKey: "paper", seed: new Uint8Array(32), irysWallet: "paper" },
     venueAddress: "paper",
-    strategyId: strategyId({
-      promptTemplate: PROMPT_TEMPLATE_ID,
-      schemaHash: schemaHash(),
-      model: need("AZURE_OPENAI_MODEL"),
-      limits: DEFAULT_LIMITS,
-    }),
+    strategyId: activeStrategyId,
     mode: "offchain",
   }),
   client: new DecisionClient({
@@ -87,6 +104,7 @@ const agent = new Agent({
     apiVersion: need("AZURE_OPENAI_API_VERSION"),
     deployment: need("AZURE_OPENAI_MODEL"),
   }),
+  shadow,
   venueDb,
   book: bookOf,
   mids: async () => (await info({ type: "allMids" })) as Record<string, string>,
@@ -101,6 +119,7 @@ const agent = new Agent({
   },
   volatility: (asset) => realisedVolatility(asset),
   log,
+  strategyId: activeStrategyId,
 });
 
 /*

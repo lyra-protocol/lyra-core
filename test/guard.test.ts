@@ -224,6 +224,45 @@ describe("halts", () => {
       "inference_budget_exhausted",
     );
   });
+
+  it("blocks same-direction re-entry during a post-stop cooldown", () => {
+    const s = state({ lastStopByAssetSide: new Map([["BTC:long", NOW - 30 * 60_000]]) });
+    expectRefusal(guard.approveOpen(openReq(), s), "post_stop_cooldown");
+  });
+
+  it("allows the opposite direction and allows re-entry after cooldown", () => {
+    const recent = state({ lastStopByAssetSide: new Map([["BTC:long", NOW - 30 * 60_000]]) });
+    expect(guard.approveOpen(openReq({ intent: intent({ side: "short", price: "63400.5" }) }), recent).ok).toBe(true);
+    const old = state({ lastStopByAssetSide: new Map([["BTC:long", NOW - DEFAULT_LIMITS.sameDirectionStopCooldownMs]]) });
+    expect(guard.approveOpen(openReq(), old).ok).toBe(true);
+  });
+
+  it("refuses an inference call that would cross the cost budget", () => {
+    const r = guard.approveInference(
+      { promptTokens: 100, completionTokens: 100, totalTokens: 200, costUsd: 0.02 },
+      state({ inferenceSpentTodayUsd: 1.99 }),
+    );
+    expectRefusal(r, "inference_budget_exhausted");
+  });
+
+  it("refuses an inference call that would cross the token budget", () => {
+    const r = guard.approveInference(
+      { promptTokens: 600, completionTokens: 400, totalTokens: 1000, costUsd: 0.001 },
+      state({ inferenceTokensToday: DEFAULT_LIMITS.maxDailyInferenceTokens - 999 }),
+    );
+    expectRefusal(r, "inference_budget_exhausted");
+  });
+
+  it("permits an inference reservation that lands exactly on both limits", () => {
+    const r = guard.approveInference(
+      { promptTokens: 600, completionTokens: 400, totalTokens: 1000, costUsd: 0.01 },
+      state({
+        inferenceSpentTodayUsd: DEFAULT_LIMITS.maxDailyInferenceUsd - 0.01,
+        inferenceTokensToday: DEFAULT_LIMITS.maxDailyInferenceTokens - 1000,
+      }),
+    );
+    expect(r.ok).toBe(true);
+  });
 });
 
 /* ── freshness ─────────────────────────────────────────────────────────────── */

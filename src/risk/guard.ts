@@ -30,6 +30,7 @@ import {
 } from "../orders.js";
 import { DEFAULT_LIMITS, validateLimits, type Limits } from "./limits.js";
 import type { RiskState } from "./state.js";
+import type { TokenUsage } from "../decide/client.js";
 
 /** Why an order was refused. Stable identifiers — the ledger records these. */
 export type RefusalCode =
@@ -45,6 +46,7 @@ export type RefusalCode =
   | "asset_exposure_too_large"
   | "total_exposure_too_large"
   | "expected_move_too_small"
+  | "post_stop_cooldown"
   | "would_cross_spread"
   | "not_reduce_only"
   | "no_position_to_reduce"
@@ -55,6 +57,7 @@ export type RefusalCode =
 export type Refusal = { ok: false; code: RefusalCode; detail: string };
 export type Approval = { ok: true; order: ApprovedOrder };
 export type GuardResult = Approval | Refusal;
+export type InferenceGuardResult = { ok: true } | Refusal;
 
 export type OpenRequest = {
   intent: OrderIntent;
@@ -115,6 +118,19 @@ export class Guard {
       return refuse("malformed", "an opening order must not be reduce-only");
     }
 
+    const stoppedAt = state.lastStopByAssetSide.get(`${req.intent.asset}:${req.intent.side}`);
+    if (stoppedAt !== undefined) {
+      const elapsed = this.now() - stoppedAt;
+      if (elapsed < this.limits.sameDirectionStopCooldownMs) {
+        const remainingMinutes = Math.ceil((this.limits.sameDirectionStopCooldownMs - elapsed) / 60_000);
+        return refuse(
+          "post_stop_cooldown",
+          `${req.intent.asset} ${req.intent.side} stopped ${Math.floor(elapsed / 60_000)} minutes ago; ` +
+            `same-direction re-entry is paused for ${remainingMinutes} more minutes`,
+        );
+      }
+    }
+
     if (!Number.isFinite(req.notionalUsd) || req.notionalUsd <= 0) {
       return refuse("malformed", `notionalUsd must be positive, got ${req.notionalUsd}`);
     }
@@ -171,6 +187,27 @@ export class Guard {
     // Last, because it is the one check that can also fail for a benign reason
     // (the book moved), and its refusal means "re-price", not "stop".
     return this.approveAsMaker(req.intent, req.book);
+  }
+
+  /** Reserves inference before transport, so the call that crosses a budget never starts. */
+  approveInference(reservation: TokenUsage, state: RiskState): InferenceGuardResult {
+    const projectedCost = state.inferenceSpentTodayUsd + reservation.costUsd;
+    if (projectedCost > this.limits.maxDailyInferenceUsd) {
+      return refuse(
+        "inference_budget_exhausted",
+        `call would take inference spend to $${projectedCost.toFixed(3)}, budget ` +
+          `$${this.limits.maxDailyInferenceUsd.toFixed(2)}`,
+      );
+    }
+    const projectedTokens = state.inferenceTokensToday + reservation.totalTokens;
+    if (projectedTokens > this.limits.maxDailyInferenceTokens) {
+      return refuse(
+        "inference_budget_exhausted",
+        `call would take inference usage to ${projectedTokens} tokens, budget ` +
+          `${this.limits.maxDailyInferenceTokens}`,
+      );
+    }
+    return { ok: true };
   }
 
   /**
@@ -238,6 +275,14 @@ export class Guard {
         "inference_budget_exhausted",
         `inference spend today is $${state.inferenceSpentTodayUsd.toFixed(2)}, budget ` +
           `$${this.limits.maxDailyInferenceUsd.toFixed(2)}`,
+      );
+    }
+
+    if (state.inferenceTokensToday >= this.limits.maxDailyInferenceTokens) {
+      return refuse(
+        "inference_budget_exhausted",
+        `inference usage today is ${state.inferenceTokensToday} tokens, budget ` +
+          `${this.limits.maxDailyInferenceTokens}`,
       );
     }
 

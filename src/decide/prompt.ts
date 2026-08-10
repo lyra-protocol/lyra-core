@@ -46,9 +46,22 @@ correct answer — you are not required to find an opportunity.
 
 If the evidence does not support a clear read, hold and say why.
 
+Output contract:
+- When flat, open_long/open_short includes a non-none hypothesis, target_px,
+  and thesis_status no_position. expected_move is derived by deterministic code
+  from entry and target; do not output it. A flat hold uses hypothesis none
+  and thesis_status no_position. Closing while flat is unavailable.
+- When positioned, opening again is unavailable. Hold uses the opening
+  hypothesis and thesis_status intact. Close uses the opening hypothesis and
+  thesis_status invalidated or played_out.
+- Hold and close do not restate target_px or expected_move; those belong only to
+  opening decisions.
+
 When you open, name target_px: the price that would prove the hypothesis right,
 normally the liquidation cluster you are trading toward. A claim about where
 price goes is not a claim until it names where.
+
+In evidence_event_ids, copy supplied ids exactly, without brackets or decoration.
 
 If you already hold a position, you are reading a decision you have already
 made, not making a fresh one. Set thesis_status:
@@ -300,6 +313,27 @@ export function performanceObservations(trades: readonly {
   }
 
   return out;
+}
+
+/** Compact durable evidence from lifetime and rolling windows. */
+export function learningObservations(stats: readonly {
+  dimension: string;
+  key: string;
+  trades: number;
+  wins: number;
+  netUsd: number;
+}[]): Observation[] {
+  const eligible = stats.filter((s) => s.trades >= 3);
+  if (eligible.length === 0) return [];
+  const line = (dimension: string) => eligible
+    .filter((s) => s.dimension === dimension)
+    .sort((a, b) => b.netUsd - a.netUsd)
+    .map((s) => `${s.key}: ${s.trades} trades, ${Math.round(100 * s.wins / s.trades)}% wins, ${s.netUsd >= 0 ? "+" : ""}${s.netUsd.toFixed(2)} USD`)
+    .join("; ");
+  return [
+    { id: "own_record_by_asset", text: `Measured lifetime record by asset — ${line("asset")}.` },
+    { id: "own_record_by_side", text: `Measured lifetime record by side — ${line("side")}.` },
+  ].filter((o) => !o.text.endsWith("— ."));
 }
 
 /** Renders observations into the user prompt, one id per line. */

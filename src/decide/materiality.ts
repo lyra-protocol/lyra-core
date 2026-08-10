@@ -52,6 +52,7 @@ export type MaterialityTrigger =
   | "liquidation_burst"
   | "position_review"
   | "position_heartbeat"
+  | "position_opened"
   | "losing_side_flipped";
 
 export type SkipReason =
@@ -68,6 +69,7 @@ export type LastSeen = {
   at: number;
   aggregateUnrealizedPnlUsd: number;
   losingSide: PainMap["losingSide"];
+  openPosition: { positionId: number; unrealizedPnlUsd: number } | null;
 };
 
 export type GateInputs = {
@@ -79,10 +81,11 @@ export type GateInputs = {
   /** Threshold above which a burst of closures is itself the signal. */
   liquidationBurstThreshold?: number;
   openPosition?: {
+    positionId: number;
     notionalUsd: number;
     unrealizedPnlUsd: number;
     /** uPnL at the last consultation, to measure the move against. */
-    lastReviewedPnlUsd: number;
+    lastReviewedPnlUsd: number | null;
   };
 };
 
@@ -169,13 +172,19 @@ export function assessMateriality(
 
   if (inputs.openPosition) {
     const p = inputs.openPosition;
-    const move = Math.abs(p.unrealizedPnlUsd - p.lastReviewedPnlUsd);
-    if (p.notionalUsd > 0 && move / p.notionalUsd >= config.positionReviewMoveFraction) {
-      triggers.push("position_review");
-      notes.push(`open position moved $${Math.round(move).toLocaleString()}`);
+    if (last?.openPosition?.positionId !== p.positionId) {
+      triggers.push("position_opened");
+      notes.push("new position has not been reviewed");
+    } else if (p.lastReviewedPnlUsd !== null) {
+      const move = Math.abs(p.unrealizedPnlUsd - p.lastReviewedPnlUsd);
+      if (p.notionalUsd > 0 && move / p.notionalUsd >= config.positionReviewMoveFraction) {
+        triggers.push("position_review");
+        notes.push(`open position moved $${Math.round(move).toLocaleString()}`);
+      } else if (last && now - last.at >= config.openPositionMaxIntervalMs) {
+        triggers.push("position_heartbeat");
+        notes.push(`open position unreviewed for ${Math.round((now - last.at) / 60000)}m`);
+      }
     } else if (last && now - last.at >= config.openPositionMaxIntervalMs) {
-      // She holds trades as long as she judges necessary, so a position must not
-      // be able to sit unexamined indefinitely just because the market is quiet.
       triggers.push("position_heartbeat");
       notes.push(`open position unreviewed for ${Math.round((now - last.at) / 60000)}m`);
     }

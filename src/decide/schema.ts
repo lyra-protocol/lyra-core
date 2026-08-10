@@ -24,7 +24,11 @@
 
 import { createHash } from "node:crypto";
 
-export const PROMPT_TEMPLATE_ID = "pain-map-decide/v1";
+export const PROMPT_TEMPLATE_ID = "pain-map-decide/v3-derived-move";
+
+export type DecisionGenerationContext =
+  | { kind: "flat" }
+  | { kind: "positioned"; originalHypothesis: "magnet" | "wall" | "cascade" };
 
 /**
  * JSON schema sent to the model, with `strict: true`.
@@ -32,7 +36,61 @@ export const PROMPT_TEMPLATE_ID = "pain-map-decide/v1";
  * Property order is the order the model must answer in. `action` appears only
  * after the two observations that determine it.
  */
-export const DECISION_JSON_SCHEMA = {
+const commonProperties = {
+  observed: {
+    type: "string",
+    description: "What the enumerated positions show before interpretation.",
+  },
+  losing_side: {
+    type: "string",
+    enum: ["longs", "shorts", "neither"],
+  },
+  forced_orders_are: {
+    type: "string",
+    enum: ["buys_above_spot", "sells_below_spot", "mixed"],
+  },
+  conviction: { type: "number", description: "0 to 1." },
+  reasoning: { type: "string" },
+  evidence_event_ids: { type: "array", items: { type: "string" } },
+} as const;
+
+function branch(properties: Record<string, unknown>) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: Object.keys(properties),
+    properties,
+  } as const;
+}
+
+export function decisionJsonSchema(context: DecisionGenerationContext = { kind: "flat" }) {
+  const common = commonProperties;
+  const branches = context.kind === "flat"
+    ? [
+        branch({ ...common, hypothesis: { type: "string", enum: ["magnet", "wall", "cascade"] }, action: { type: "string", enum: ["open_long"] }, target_px: { type: "number" }, thesis_status: { type: "string", enum: ["no_position"] } }),
+        branch({ ...common, hypothesis: { type: "string", enum: ["magnet", "wall", "cascade"] }, action: { type: "string", enum: ["open_short"] }, target_px: { type: "number" }, thesis_status: { type: "string", enum: ["no_position"] } }),
+        branch({ ...common, hypothesis: { type: "string", enum: ["none"] }, action: { type: "string", enum: ["hold"] }, thesis_status: { type: "string", enum: ["no_position"] } }),
+      ]
+    : [
+        branch({ ...common, hypothesis: { type: "string", enum: [context.originalHypothesis] }, action: { type: "string", enum: ["hold"] }, thesis_status: { type: "string", enum: ["intact"] } }),
+        branch({ ...common, hypothesis: { type: "string", enum: [context.originalHypothesis] }, action: { type: "string", enum: ["close"] }, thesis_status: { type: "string", enum: ["invalidated", "played_out"] } }),
+      ];
+  return {
+    name: "lyra_decision",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["decision"],
+      properties: { decision: { anyOf: branches } },
+    },
+  } as const;
+}
+
+export const DECISION_JSON_SCHEMA = decisionJsonSchema();
+
+/* Legacy schema documentation retained below for historical context. */
+const LEGACY_DECISION_JSON_SCHEMA = {
   name: "lyra_decision",
   strict: true,
   schema: {
@@ -146,9 +204,9 @@ export type Decision = {
 };
 
 /** Hash of the schema, so a change to it is visible as a change to `strategy_id`. */
-export function schemaHash(): string {
+export function schemaHash(schema: unknown = DECISION_JSON_SCHEMA): string {
   return createHash("sha256")
-    .update(JSON.stringify(DECISION_JSON_SCHEMA))
+    .update(JSON.stringify(schema))
     .digest("hex");
 }
 
@@ -180,7 +238,9 @@ export function validateDecision(
     return fail("malformed_json", `response was not JSON: ${(error as Error).message}`);
   }
 
-  const d = parsed as Partial<Decision>;
+  const root = parsed as Record<string, unknown>;
+  const wire = root && typeof root === "object" && "decision" in root ? root.decision : parsed;
+  const d = wire as Partial<Decision>;
 
   const enums: [keyof Decision, readonly string[]][] = [
     ["losing_side", ["longs", "shorts", "neither"]],
@@ -206,15 +266,8 @@ export function validateDecision(
   if (typeof d.conviction !== "number" || !(d.conviction >= 0 && d.conviction <= 1)) {
     return fail("out_of_range", `conviction must be between 0 and 1, got ${d.conviction}`);
   }
-  if (typeof d.expected_move !== "number" || !Number.isFinite(d.expected_move)) {
-    return fail("out_of_range", `expected_move must be a finite number, got ${d.expected_move}`);
-  }
-  // A model claiming a 60% move has misread the data or the units. Acting on it
-  // would size a position against a number nobody should believe.
-  if (Math.abs(d.expected_move) > 0.5) {
-    return fail("out_of_range", `expected_move of ${d.expected_move} is implausible for a perp`);
-  }
-  if (typeof d.target_px !== "number" || !Number.isFinite(d.target_px) || d.target_px < 0) {
+  const opening = d.action === "open_long" || d.action === "open_short";
+  if (opening && (typeof d.target_px !== "number" || !Number.isFinite(d.target_px) || d.target_px < 0)) {
     return fail("out_of_range", `target_px must be a non-negative finite number, got ${d.target_px}`);
   }
 
@@ -254,7 +307,8 @@ export function validateDecision(
   }
 
   const supplied = new Set(suppliedEventIds);
-  const invented = d.evidence_event_ids.filter((id) => !supplied.has(id));
+  const cited = d.evidence_event_ids.map(normalizeCitation);
+  const invented = cited.filter((id) => !supplied.has(id));
   if (invented.length > 0) {
     return fail(
       "ungrounded_citation",
@@ -268,7 +322,27 @@ export function validateDecision(
     return fail("ungrounded_citation", "a decision to trade must cite at least one observation");
   }
 
-  return { ok: true, decision: d as Decision };
+  if (!opening && ("target_px" in (wire as object) || "expected_move" in (wire as object))) {
+    return fail("schema_mismatch", `${d.action} must not include target_px or expected_move`);
+  }
+
+  return {
+    ok: true,
+    decision: {
+      ...(d as Decision),
+      evidence_event_ids: cited,
+      target_px: opening ? d.target_px! : 0,
+      // Distance is arithmetic, not judgement. Derive it later from the exact
+      // entry price used for semantic checks and execution planning.
+      expected_move: 0,
+    },
+  };
+}
+
+function normalizeCitation(id: unknown): string {
+  if (typeof id !== "string") return String(id);
+  const match = /^\[([^\[\]]+)\]$/.exec(id.trim());
+  return match?.[1] ?? id;
 }
 
 function fail(code: ValidationFailure["code"], detail: string) {
