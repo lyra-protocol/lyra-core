@@ -192,10 +192,11 @@ export function createColdServer(config: ServeConfig) {
         (total, p) => total + ((p.opened_at as number) >= since ? Number(p.fees ?? 0) : 0),
         0,
       );
+      const openFeesBeforeToday = openFeesAll - openFeesToday;
       const equity = startingEquity + realisedAll - feesAll - openFeesAll + unrealised;
 
       // The 7% breaker measures the day against the equity the day opened with.
-      const sessionStart = startingEquity + priorToToday.p - priorToToday.f;
+      const sessionStart = startingEquity + priorToToday.p - priorToToday.f - openFeesBeforeToday;
       const sessionPnl = today.p - today.f - openFeesToday + unrealised;
       const dailyLossUsed = sessionStart > 0 ? Math.max(0, -sessionPnl) / sessionStart : 0;
 
@@ -242,8 +243,8 @@ export function createColdServer(config: ServeConfig) {
         .prepare(
           `SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0) AS p,
                   COALESCE(SUM(CAST(fees AS REAL)), 0) AS f,
-                  SUM(CASE WHEN CAST(pnl AS REAL) > 0 THEN 1 ELSE 0 END) AS w,
-                  SUM(CASE WHEN CAST(pnl AS REAL) <= 0 THEN 1 ELSE 0 END) AS l
+              SUM(CASE WHEN CAST(pnl AS REAL) - CAST(fees AS REAL) > 0 THEN 1 ELSE 0 END) AS w,
+              SUM(CASE WHEN CAST(pnl AS REAL) - CAST(fees AS REAL) <= 0 THEN 1 ELSE 0 END) AS l
              FROM position WHERE closed_at IS NOT NULL`,
         )
         .get() as { p: number; f: number; w: number | null; l: number | null };
