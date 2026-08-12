@@ -210,10 +210,12 @@ export class Agent {
     if (existing) {
       const lockedStop = profitLockStop({
         side: existing.side,
+        size: existing.size,
         entryPx: existing.entryPx,
         markPx: map.midPx,
         targetPx: existing.targetPx,
         currentStopPx: existing.stopPx,
+        entryFees: existing.fees ?? "0",
       });
       if (lockedStop) {
         await this.replaceProtectiveStop(existing.id, asset, lockedStop);

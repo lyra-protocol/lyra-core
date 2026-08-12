@@ -150,16 +150,22 @@ export function stopPrice(inputs: {
  */
 export function profitLockStop(inputs: {
   side: "long" | "short";
+  size: string;
   entryPx: string;
   markPx: string;
   targetPx: string | null;
   currentStopPx: string | null;
+  entryFees: string;
+  stopExitFeeBps?: number;
 }): string | null {
+  const size = Number(inputs.size);
   const entry = Number(inputs.entryPx);
   const mark = Number(inputs.markPx);
   const target = Number(inputs.targetPx);
   const current = Number(inputs.currentStopPx);
-  if (![entry, mark, target].every(Number.isFinite) || entry <= 0 || target <= 0) return null;
+  const entryFees = Number(inputs.entryFees);
+  if (![size, entry, mark, target, entryFees].every(Number.isFinite)
+      || size <= 0 || entry <= 0 || target <= 0 || entryFees < 0) return null;
 
   const plannedMove = inputs.side === "long" ? target - entry : entry - target;
   const travelled = inputs.side === "long" ? mark - entry : entry - mark;
@@ -169,9 +175,18 @@ export function profitLockStop(inputs: {
   const lockFraction = progress >= 0.75 ? 0.5 : progress >= 0.5 ? 0.25 : progress >= 0.25 ? 0 : null;
   if (lockFraction === null) return null;
 
-  const proposed = inputs.side === "long"
+  const milestoneStop = inputs.side === "long"
     ? entry + plannedMove * lockFraction
     : entry - plannedMove * lockFraction;
+  // A stop at entry is not net breakeven: the entry fee is already paid and a
+  // protective stop crosses the spread. Move far enough beyond entry to cover
+  // both, using entry price for the conservative exit-fee estimate.
+  const estimatedExitFee = size * entry * ((inputs.stopExitFeeBps ?? 4.5) / 10_000);
+  const feeDistance = (entryFees + estimatedExitFee) / size;
+  const feeBreakeven = inputs.side === "long" ? entry + feeDistance : entry - feeDistance;
+  const proposed = inputs.side === "long"
+    ? Math.max(milestoneStop, feeBreakeven)
+    : Math.min(milestoneStop, feeBreakeven);
   if (!Number.isFinite(proposed) || proposed <= 0) return null;
 
   // Never loosen an existing stop, and avoid venue churn for sub-basis-point moves.
