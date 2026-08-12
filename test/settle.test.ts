@@ -19,7 +19,7 @@ import { PaperVenue } from "../src/execute/paper.js";
 import { ExecutionStore } from "../src/execute/store.js";
 import { approveMaker, type OrderIntent } from "../src/orders.js";
 import { deriveCloid } from "../src/execute/venue.js";
-import { Agent, restingExitFor } from "../src/agent.js";
+import { Agent, restingEntryFor, restingExitFor } from "../src/agent.js";
 import { performanceObservations } from "../src/decide/prompt.js";
 import { validateDecision } from "../src/decide/schema.js";
 import { DatabaseSync } from "node:sqlite";
@@ -191,6 +191,19 @@ describe("scaling into a level", () => {
     const position = s.openPositions()[0]!;
     expect(position.stopCloid).not.toBeNull();
     expect(position.stopCloid).not.toBe(firstStop);
+  });
+});
+
+describe("a position can only have one entry working", () => {
+  it("finds an existing entry without confusing exits or other assets", () => {
+    const intents = [
+      { asset: "BTC", reduceOnly: false, price: "63400" },
+      { asset: "ETH", reduceOnly: false, price: "1800" },
+      { asset: "BTC", reduceOnly: true, price: "63500" },
+    ];
+    expect(restingEntryFor(intents, "BTC")?.price).toBe("63400");
+    expect(restingEntryFor(intents, "SOL")).toBeUndefined();
+    expect(restingEntryFor([{ asset: "BTC", reduceOnly: true }], "BTC")).toBeUndefined();
   });
 });
 

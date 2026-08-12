@@ -483,6 +483,19 @@ export class Agent {
     const { side, book: b, price, notionalUsd, size } = plan;
     const cloid = deriveCloid(decisionId, 0);
 
+    // A maker entry can rest for minutes. A later decision must not place a
+    // second entry for the same asset while the first is still live: both can
+    // fill in one settlement pass, potentially on opposite sides, leaving the
+    // venue with a net position that no single stored decision describes.
+    const entering = restingEntryFor(this.config.store.unresolvedIntents(), asset);
+    if (entering) {
+      this.config.store.setDecisionOutcome(decisionId, "refused:entry_already_resting");
+      return {
+        asset, result: "refused", code: "entry_already_resting",
+        detail: `an entry for ${asset} is already resting at ${entering.price}`,
+      };
+    }
+
     const approval = this.guard.approveOpen(
       {
         intent: { asset, side, price, size, reduceOnly: false, cloid },
@@ -949,6 +962,14 @@ export function restingExitFor<T extends { asset: string; reduceOnly: boolean }>
   asset: string,
 ): T | undefined {
   return intents.find((i) => i.asset === asset && i.reduceOnly);
+}
+
+/** The entry already working for an asset, if there is one. */
+export function restingEntryFor<T extends { asset: string; reduceOnly: boolean }>(
+  intents: readonly T[],
+  asset: string,
+): T | undefined {
+  return intents.find((i) => i.asset === asset && !i.reduceOnly);
 }
 
 /**

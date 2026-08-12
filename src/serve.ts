@@ -129,7 +129,7 @@ export function createColdServer(config: ServeConfig) {
         };
       }
       const open = execDb
-        .prepare(`SELECT asset, side, size, entry_px, stop_cloid, stop_px, opened_at
+        .prepare(`SELECT asset, side, size, entry_px, stop_cloid, stop_px, opened_at, fees
                   FROM position WHERE closed_at IS NULL`)
         .all() as Record<string, unknown>[];
       const px = await mids();
@@ -184,11 +184,19 @@ export function createColdServer(config: ServeConfig) {
       const startingEquity = Number(process.env.LYRA_PAPER_EQUITY ?? 10_000);
       const realisedAll = today.p + priorToToday.p;
       const feesAll = today.f + priorToToday.f;
-      const equity = startingEquity + realisedAll - feesAll + unrealised;
+      // Entry fees are paid when a position opens, not when it closes. They are
+      // stored on open rows and must be deducted now or equity jumps downward
+      // only at close, making an open account look better than the venue.
+      const openFeesAll = open.reduce((total, p) => total + Number(p.fees ?? 0), 0);
+      const openFeesToday = open.reduce(
+        (total, p) => total + ((p.opened_at as number) >= since ? Number(p.fees ?? 0) : 0),
+        0,
+      );
+      const equity = startingEquity + realisedAll - feesAll - openFeesAll + unrealised;
 
       // The 7% breaker measures the day against the equity the day opened with.
       const sessionStart = startingEquity + priorToToday.p - priorToToday.f;
-      const sessionPnl = today.p - today.f + unrealised;
+      const sessionPnl = today.p - today.f - openFeesToday + unrealised;
       const dailyLossUsed = sessionStart > 0 ? Math.max(0, -sessionPnl) / sessionStart : 0;
 
       return {
