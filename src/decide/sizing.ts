@@ -140,3 +140,43 @@ export function stopPrice(inputs: {
 
   return stop > 0 ? String(stop) : null;
 }
+
+/**
+ * Tightens a profitable position's stop as it advances toward its recorded target.
+ *
+ * This is deterministic risk management, not a second exit strategy: the target
+ * and thesis remain unchanged, while an open winner progressively stops being
+ * allowed to turn into a full-risk loser. Stops only move toward profit.
+ */
+export function profitLockStop(inputs: {
+  side: "long" | "short";
+  entryPx: string;
+  markPx: string;
+  targetPx: string | null;
+  currentStopPx: string | null;
+}): string | null {
+  const entry = Number(inputs.entryPx);
+  const mark = Number(inputs.markPx);
+  const target = Number(inputs.targetPx);
+  const current = Number(inputs.currentStopPx);
+  if (![entry, mark, target].every(Number.isFinite) || entry <= 0 || target <= 0) return null;
+
+  const plannedMove = inputs.side === "long" ? target - entry : entry - target;
+  const travelled = inputs.side === "long" ? mark - entry : entry - mark;
+  if (plannedMove <= 0 || travelled <= 0) return null;
+
+  const progress = travelled / plannedMove;
+  const lockFraction = progress >= 0.75 ? 0.5 : progress >= 0.5 ? 0.25 : progress >= 0.25 ? 0 : null;
+  if (lockFraction === null) return null;
+
+  const proposed = inputs.side === "long"
+    ? entry + plannedMove * lockFraction
+    : entry - plannedMove * lockFraction;
+  if (!Number.isFinite(proposed) || proposed <= 0) return null;
+
+  // Never loosen an existing stop, and avoid venue churn for sub-basis-point moves.
+  const tighter = !Number.isFinite(current)
+    || (inputs.side === "long" ? proposed > current : proposed < current);
+  if (!tighter || Math.abs(proposed - current) / entry < 0.0001) return null;
+  return String(proposed);
+}

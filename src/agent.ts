@@ -31,7 +31,7 @@ import {
   positionObservations,
   SYSTEM_PROMPT,
 } from "./decide/prompt.js";
-import { makerPrice, sizePosition, stopPrice } from "./decide/sizing.js";
+import { makerPrice, profitLockStop, sizePosition, stopPrice } from "./decide/sizing.js";
 import { deriveDecisionMetrics, validateDecisionSemantics } from "./decide/semantics.js";
 import type { ShadowEvaluator } from "./decide/shadow.js";
 import { Guard } from "./risk/guard.js";
@@ -202,6 +202,21 @@ export class Agent {
       if (Number.isFinite(target) && target > 0 && reached) {
         this.log(`${asset}: target ${existing.targetPx} reached at ${map.midPx} — taking it`);
         return await this.closePosition(asset, `${existing.decisionId}:target`, "target_reached");
+      }
+    }
+
+    // Profit protection is a hot-path risk rule. It cannot wait for coverage,
+    // materiality or a model call, and it never changes the target or thesis.
+    if (existing) {
+      const lockedStop = profitLockStop({
+        side: existing.side,
+        entryPx: existing.entryPx,
+        markPx: map.midPx,
+        targetPx: existing.targetPx,
+        currentStopPx: existing.stopPx,
+      });
+      if (lockedStop) {
+        await this.replaceProtectiveStop(existing.id, asset, lockedStop);
       }
     }
 
@@ -781,6 +796,30 @@ export class Agent {
     });
     this.config.store.attachStop(positionId, cloid, trigger);
     this.log(`${asset}: stop resting at ${trigger}`);
+    return cloid;
+  }
+
+  private async replaceProtectiveStop(
+    positionId: number,
+    asset: string,
+    triggerPx: string,
+  ): Promise<string | null> {
+    const position = this.config.store.openPositions().find((p) => p.id === positionId);
+    if (!position) return null;
+    if (position.stopCloid) {
+      try { await this.config.venue.cancel(asset, position.stopCloid); }
+      catch (error) { this.log(`${asset}: could not cancel old stop — ${(error as Error).message}`); }
+    }
+    const cloid = deriveCloid(`${position.decisionId}:profit-lock:${triggerPx}`, 0);
+    await this.config.venue.placeStop({
+      asset,
+      side: position.side === "long" ? "short" : "long",
+      triggerPx,
+      size: position.size,
+      cloid,
+    });
+    this.config.store.attachStop(positionId, cloid, triggerPx);
+    this.log(`${asset}: profit lock moved stop to ${triggerPx}`);
     return cloid;
   }
 
